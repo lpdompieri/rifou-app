@@ -3,7 +3,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 const navItems = [
   { id: 'overview', label: 'Visão geral', icon: 'home' },
   { id: 'raffles', label: 'Minhas rifas', icon: 'ticket' },
+  { id: 'public-profile', label: 'Perfil público', icon: 'eye' },
   { id: 'participants', label: 'Participantes', icon: 'users' },
+  { id: 'marketing', label: 'Marketing', icon: 'users' },
   { id: 'draw', label: 'Sorteios', icon: 'draw' },
   { id: 'finance', label: 'Financeiro', icon: 'wallet' },
   { id: 'audit', label: 'Auditoria', icon: 'history' },
@@ -124,7 +126,7 @@ async function postJson(path, payload) {
     body: JSON.stringify(payload),
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.message || 'Não foi possível concluir a solicitação.');
+  if (!response.ok) { const error = new Error(result.message || 'Não foi possível concluir a solicitação.'); error.payload = result; throw error; }
   return result;
 }
 
@@ -136,7 +138,7 @@ async function organizerApi(path, options = {}, retryAfterRefresh = true) {
     if (session.status === 401) window.location.assign('/organizador/login');
   }
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.message || 'Não foi possível concluir a solicitação.');
+  if (!response.ok) { const error = new Error(result.message || 'Não foi possível concluir a solicitação.'); error.payload = result; throw error; }
   return result;
 }
 
@@ -173,15 +175,14 @@ function formRafflePayload(formData, organizer) {
     priceInCents: parseCurrencyToCents(formData.get('price')),
     numberCount: Number(formData.get('numbers')),
     maxNumbersPerUser: Number(formData.get('maxNumbersPerUser')),
-    featured: formData.get('featured') === 'on',
     drawingDate: String(formData.get('date') || ''),
     status: String(formData.get('status') || 'DRAFT'),
     organizer,
   };
 }
 
-async function uploadRaffleImage(file) {
-  const upload = await organizerApi('/api/organizador/raffle-images/upload-url', {
+async function uploadRaffleImage(file, uploadEndpoint = '/api/organizador/raffle-images/upload-url') {
+  const upload = await organizerApi(uploadEndpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ contentType: file.type, size: file.size }),
@@ -519,7 +520,6 @@ function OrganizerDashboard({ user, onUserUpdate }) {
       setNotice('O valor total do prêmio precisa ser igual ao valor por número multiplicado pela quantidade de números.');
       return;
     }
-    if (payload.status !== 'ACTIVE') payload.featured = false;
     setSaving(true);
     setNotice('');
     try {
@@ -532,28 +532,12 @@ function OrganizerDashboard({ user, onUserUpdate }) {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
         });
       const saved = normalizeOrganizerRaffle(result.item);
-      let featuredError = '';
-      const shouldSetFeatured = payload.featured && payload.status === 'ACTIVE';
-      const shouldClearFeatured = Boolean(editingRaffle?.featured && !shouldSetFeatured);
-      if (shouldSetFeatured || shouldClearFeatured) {
-        try {
-          await organizerApi('/api/organizador/home-featured-raffle', {
-            method: 'PUT',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ raffleId: shouldSetFeatured ? saved.id : null }),
-          });
-        } catch (error) {
-          featuredError = error.message || 'Não foi possível atualizar a rifa em destaque.';
-        }
-      }
       const dashboard = await loadDashboard();
       const savedRaffle = Array.isArray(dashboard.items)
         ? dashboard.items.map(normalizeOrganizerRaffle).find((raffle) => raffle.id === saved.id) || saved
         : saved;
       setEditingRaffle(null);
-      setNotice(featuredError
-        ? `Rifa salva, mas o destaque não foi atualizado: ${featuredError}`
-        : editingRaffle ? 'Rifa atualizada.' : 'Rifa criada com sucesso.');
+      setNotice(editingRaffle ? 'Rifa atualizada.' : 'Rifa criada com sucesso.');
       setManagedRaffle(savedRaffle);
       setSection('raffle-detail');
     } catch (error) {
@@ -596,8 +580,10 @@ function OrganizerDashboard({ user, onUserUpdate }) {
           {dashboardLoading && !summary && <p className="organizer-auth__notice" role="status">Carregando seu painel...</p>}
           {section === 'overview' && !dashboardLoading && <OverviewSection raffles={raffleList} summary={summary} displayName={displayName} goTo={goTo} onManage={openRaffle} />}
           {section === 'raffles' && !dashboardLoading && <RafflesSection raffles={raffleList} goTo={goTo} onManage={openRaffle} />}
+          {section === 'public-profile' && !dashboardLoading && <PublicProfileSection raffles={raffleList} setNotice={setNotice} />}
           {section === 'raffle-detail' && managedRaffle && <RaffleManagementSection raffle={managedRaffle} goTo={goTo} onEdit={editRaffle} />}
           {section === 'participants' && <ParticipantsSection raffles={raffleList} initialRaffleId={participantsRaffleId} />}
+          {section === 'marketing' && <MarketingSection />}
           {section === 'draw' && <DrawsSection raffles={raffleList} initialRaffleId={drawRaffleId} onDrawn={handleRaffleDrawn} />}
           {section === 'finance' && <FinanceSection summary={summary} raffles={raffleList} />}
           {section === 'audit' && <AuditSection raffles={raffleList} />}
@@ -1155,6 +1141,82 @@ function DrawReceipt({ raffle, onClose }) {
   </div>;
 }
 
+function MarketingSection() {
+  const [contacts, setContacts] = useState([]);
+  const [lists, setLists] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [search, setSearch] = useState('');
+  const [relationshipFilter, setRelationshipFilter] = useState('ALL');
+  const [organizationFilter, setOrganizationFilter] = useState('ALL');
+  const [listFilter, setListFilter] = useState('ALL');
+  const [selected, setSelected] = useState([]);
+  const [listName, setListName] = useState('');
+
+  const loadContacts = async () => {
+    setLoading(true); setError('');
+    try {
+      const result = await organizerApi('/api/organizador/marketing/contacts');
+      setContacts(Array.isArray(result.items) ? result.items : []);
+      setLists(Array.isArray(result.lists) ? result.lists : []);
+    } catch (loadError) { setError(loadError.message || 'Não foi possível carregar os contatos.'); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { loadContacts(); }, []);
+
+  const visibleContacts = contacts.filter((contact) => {
+    const query = search.trim().toLocaleLowerCase('pt-BR');
+    const matchesSearch = !query || `${contact.name} ${contact.phone}`.toLocaleLowerCase('pt-BR').includes(query);
+    const matchesRelationship = relationshipFilter === 'ALL' || contact.relationshipStatus === relationshipFilter;
+    const assigned = Boolean(contact.whatsappList);
+    const matchesOrganization = organizationFilter === 'ALL' || (organizationFilter === 'ASSIGNED' ? assigned : !assigned);
+    const matchesList = listFilter === 'ALL' || contact.whatsappList === listFilter;
+    return matchesSearch && matchesRelationship && matchesOrganization && matchesList;
+  });
+
+  const saveListAssignment = async (contactIds, selectedList) => {
+    if (!contactIds.length) { setError('Selecione ao menos um contato.'); return; }
+    if (contactIds.length > 90) { setError('Associe até 90 contatos por vez.'); return; }
+    setSaving(true); setError(''); setNotice('');
+    try {
+      const result = await organizerApi('/api/organizador/marketing/contacts', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ contactIds, whatsappList: selectedList.trim() }),
+      });
+      setNotice(result.whatsappList ? `${result.updatedCount} contato(s) associado(s) à lista “${result.whatsappList}”.` : `${result.updatedCount} contato(s) removido(s) da lista.`);
+      setSelected([]); await loadContacts();
+    } catch (saveError) { setError(saveError.message || 'Não foi possível atualizar a lista.'); }
+    finally { setSaving(false); }
+  };
+
+  const exportCsv = (rows) => {
+    if (!rows.length) { setError('Não há contatos para exportar com esses filtros.'); return; }
+    const safeCell = (value) => {
+      const text = String(value ?? '').replace(/[\r\n]+/g, ' ');
+      const protectedText = /^[=+@-]/.test(text) ? `'${text}` : text;
+      return `"${protectedText.replace(/"/g, '""')}"`;
+    };
+    const header = ['Nome', 'Celular', 'Relacionamento', 'Lista WhatsApp', 'Participações', 'Rifas', 'Primeira participação', 'Última participação'];
+    const body = rows.map((contact) => [contact.name, contact.phone, contact.relationshipStatus === 'RECURRENT' ? 'Cliente recorrente' : 'Cliente novo', contact.whatsappList || 'Não cadastrado', contact.participationCount, contact.raffleCount, contact.firstParticipationAt, contact.lastParticipationAt].map(safeCell).join(';'));
+    const blob = new Blob([`\uFEFF${[header.map(safeCell).join(';'), ...body].join('\r\n')}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'rifou-contatos-marketing.csv'; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const toggleContact = (contactId) => setSelected((current) => current.includes(contactId) ? current.filter((id) => id !== contactId) : [...current, contactId]);
+  const allVisibleSelected = visibleContacts.length > 0 && visibleContacts.every((contact) => selected.includes(contact.contactId));
+  const dateLabel = (value) => value ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short' }).format(new Date(value)) : '—';
+
+  return <><DashboardHeading eyebrow="Relacionamento" title="Marketing" description="Organize participantes únicos em listas de transmissão. A confirmação das listas é manual; o Rifou não consulta o WhatsApp." action={<button className="dashboard-period" type="button" onClick={() => exportCsv(selected.length ? contacts.filter((contact) => selected.includes(contact.contactId)) : visibleContacts)}>Exportar {selected.length ? 'selecionados' : 'contatos filtrados'} para CSV</button>} />
+    <section className="dashboard-card marketing-toolbar"><div className="dashboard-card__heading"><div><h2>Contatos de todas as rifas</h2><p>{contacts.length} contatos únicos · {contacts.filter((contact) => !contact.whatsappList).length} pendentes de organização</p></div><button className="dashboard-period" type="button" onClick={loadContacts} disabled={loading}>{loading ? 'Atualizando…' : 'Atualizar'}</button></div><div className="marketing-filters"><label className="dashboard-search"><DashIcon name="search" size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar nome ou celular" aria-label="Buscar contatos" /></label><label className="organizer-field"><span>Relacionamento</span><select value={relationshipFilter} onChange={(event) => setRelationshipFilter(event.target.value)}><option value="ALL">Todos</option><option value="NEW">Cliente novo</option><option value="RECURRENT">Cliente recorrente</option></select></label><label className="organizer-field"><span>Organização</span><select value={organizationFilter} onChange={(event) => setOrganizationFilter(event.target.value)}><option value="ALL">Todos</option><option value="PENDING">Pendente de lista</option><option value="ASSIGNED">Já associado</option></select></label><label className="organizer-field"><span>Lista</span><select value={listFilter} onChange={(event) => setListFilter(event.target.value)}><option value="ALL">Todas as listas</option>{lists.map((list) => <option value={list} key={list}>{list}</option>)}</select></label></div><div className="marketing-bulk-tools"><label className="organizer-field"><span>Lista de transmissão</span><input list="marketing-whatsapp-lists" value={listName} onChange={(event) => setListName(event.target.value)} maxLength={80} placeholder="Escolha ou crie uma lista" /><datalist id="marketing-whatsapp-lists">{lists.map((list) => <option value={list} key={list} />)}</datalist></label><button className="button" type="button" disabled={saving || !selected.length || !listName.trim()} onClick={() => saveListAssignment(selected, listName)}>Associar {selected.length || ''} selecionados</button><button className="dashboard-period" type="button" disabled={saving || !selected.length} onClick={() => saveListAssignment(selected, '')}>Remover associação</button><button className="dashboard-text-button" type="button" onClick={() => exportCsv(contacts.filter((contact) => contact.relationshipStatus === 'NEW' || !contact.whatsappList))}>Exportar novos ou pendentes</button></div></section>
+    {error && <p className="organizer-auth__error" role="alert">{error}</p>}{notice && <p className="dashboard-notice" role="status">{notice}</p>}
+    <section className="dashboard-card marketing-contact-table"><div className="dashboard-table-wrap"><table className="dashboard-table"><thead><tr><th><input type="checkbox" checked={allVisibleSelected} onChange={() => setSelected((current) => allVisibleSelected ? current.filter((id) => !visibleContacts.some((contact) => contact.contactId === id)) : [...new Set([...current, ...visibleContacts.map((contact) => contact.contactId)])])} aria-label="Selecionar contatos visíveis" /></th><th>Participante</th><th>Celular</th><th>Relacionamento</th><th>Lista de transmissão</th><th>Participações</th><th>Última participação</th></tr></thead><tbody>{visibleContacts.map((contact) => <tr key={contact.contactId}><td><input type="checkbox" checked={selected.includes(contact.contactId)} onChange={() => toggleContact(contact.contactId)} aria-label={`Selecionar ${contact.name}`} /></td><td><strong>{contact.name}</strong></td><td>{contact.phone}</td><td><StatusPill status={contact.relationshipStatus === 'RECURRENT' ? 'Cliente recorrente' : 'Cliente novo'} /></td><td><select value={contact.whatsappList || ''} onChange={(event) => saveListAssignment([contact.contactId], event.target.value)} aria-label={`Lista de transmissão de ${contact.name}`} disabled={saving}><option value="">Não cadastrado</option>{lists.map((list) => <option value={list} key={list}>{list}</option>)}{contact.whatsappList && !lists.includes(contact.whatsappList) && <option value={contact.whatsappList}>{contact.whatsappList}</option>}</select></td><td>{contact.participationCount} em {contact.raffleCount} rifa(s)</td><td>{dateLabel(contact.lastParticipationAt)}</td></tr>)}</tbody></table>{loading && <p className="dashboard-empty">Consolidando histórico de participações…</p>}{!loading && !visibleContacts.length && !error && <p className="dashboard-empty">Nenhum contato corresponde a esses filtros.</p>}</div></section>
+  </>;
+}
+
 function ParticipantsSection({ raffles, initialRaffleId }) {
   const [raffleId, setRaffleId] = useState(initialRaffleId || raffles[0]?.id || '');
   const [items, setItems] = useState([]);
@@ -1164,7 +1226,13 @@ function ParticipantsSection({ raffles, initialRaffleId }) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [confirming, setConfirming] = useState(null);
+  const [proofToReject, setProofToReject] = useState(null);
+  const [rejectNote, setRejectNote] = useState('Comprovante não validado pelo organizador.');
+  const [resolving, setResolving] = useState(null);
+  const [refundResolutionStatus, setRefundResolutionStatus] = useState('PENDING');
+  const [refundResolutionNote, setRefundResolutionNote] = useState('');
   const [receipt, setReceipt] = useState(null);
+  const [historyItem, setHistoryItem] = useState(null);
   const [actionError, setActionError] = useState('');
   const [savingTransactionId, setSavingTransactionId] = useState('');
 
@@ -1199,10 +1267,10 @@ function ParticipantsSection({ raffles, initialRaffleId }) {
   const activeRaffle = raffles.find((raffle) => raffle.id === raffleId);
   const filteredItems = items.filter((item) => `${item.customer?.name || ''} ${item.customer?.phone || ''} ${(item.numbers || []).join(' ')}`.toLowerCase().includes(search.toLowerCase()));
   const dateLabel = (value) => value ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) : '—';
-  const statusLabel = (value) => ({ PENDING: 'Aguardando Pix', CONFIRMED: 'Confirmado', EXPIRED: 'Expirado' }[value] || value);
+  const statusLabel = (value, item) => item?.paymentProofReviewStatus === 'REJECTED' && value === 'PENDING' ? 'Comprovante rejeitado' : ({ PENDING: 'Aguardando Pix', UNDER_REVIEW: 'ANALISAR COMPROVANTE', UNDER_REVIEW_EXPIRED: 'ANALISAR COMPROVANTE · reserva expirada', RESOLUTION_REQUIRED: 'RESOLUÇÃO FINANCEIRA', CONFIRMED: 'Confirmado', EXPIRED: 'Expirado' }[value] || value);
 
   const confirmPayment = async () => {
-    if (!confirming || confirming.status !== 'PENDING') return;
+    if (!confirming || !['PENDING', 'UNDER_REVIEW', 'UNDER_REVIEW_EXPIRED'].includes(confirming.status)) return;
     setSavingTransactionId(confirming.transactionId);
     setActionError('');
     try {
@@ -1216,9 +1284,34 @@ function ParticipantsSection({ raffles, initialRaffleId }) {
       await loadPage(false);
     } catch (confirmError) {
       setActionError(confirmError.message || 'Não foi possível confirmar este pagamento. Atualize a lista e tente novamente.');
+      if (confirmError.payload?.code === 'NUMBER_CONFLICT') { setConfirming(null); await loadPage(false); }
     } finally {
       setSavingTransactionId('');
     }
+  };
+
+  const rejectProof = async () => {
+    if (!proofToReject) return;
+    setSavingTransactionId(proofToReject.transactionId); setActionError('');
+    try {
+      await organizerApi(`/api/organizador/raffles/${encodeURIComponent(raffleId)}/transactions/${encodeURIComponent(proofToReject.transactionId)}/proof/reject`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ note: rejectNote }),
+      });
+      setProofToReject(null); setNotice('Comprovante rejeitado. A decisão foi registrada no histórico da compra.'); await loadPage(false);
+    } catch (rejectError) { setActionError(rejectError.message || 'Não foi possível rejeitar o comprovante.'); }
+    finally { setSavingTransactionId(''); }
+  };
+
+  const saveResolution = async () => {
+    if (!resolving) return;
+    setSavingTransactionId(resolving.transactionId); setActionError('');
+    try {
+      await organizerApi(`/api/organizador/raffles/${encodeURIComponent(raffleId)}/transactions/${encodeURIComponent(resolving.transactionId)}/resolution`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ refundStatus: refundResolutionStatus, note: refundResolutionNote }),
+      });
+      setResolving(null); setNotice('A resolução financeira foi atualizada.'); await loadPage(false);
+    } catch (resolutionError) { setActionError(resolutionError.message || 'Não foi possível atualizar a resolução.'); }
+    finally { setSavingTransactionId(''); }
   };
 
   return <><DashboardHeading eyebrow="Relacionamento" title="Participantes" description="Consulte reservas e participações vinculadas às suas rifas." />
@@ -1226,10 +1319,14 @@ function ParticipantsSection({ raffles, initialRaffleId }) {
       <section className="dashboard-card dashboard-raffles-card"><div className="dashboard-list-toolbar"><div><h2>{activeRaffle?.title || 'Participantes da rifa'}</h2><p>Dados de contato ficam visíveis somente ao proprietário da rifa.</p></div><div className="dashboard-participant-tools"><label className="organizer-field"><span>Rifa</span><select value={raffleId} onChange={(event) => setRaffleId(event.target.value)}>{raffles.map((raffle) => <option value={raffle.id} key={raffle.id}>{raffle.title}</option>)}</select></label><label className="dashboard-search"><DashIcon name="search" size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar nome, telefone ou número" aria-label="Buscar participante" /></label></div></div>
         {notice && <p className="dashboard-notice" role="status">{notice}<button type="button" onClick={() => setNotice('')} aria-label="Fechar aviso">×</button></p>}
         {error && <p className="organizer-auth__error" role="alert">{error} <button className="dashboard-text-button" type="button" onClick={() => loadPage(false)}>Tentar novamente</button></p>}
-        <div className="dashboard-table-wrap"><table className="dashboard-table"><thead><tr><th>Participante</th><th>Telefone</th><th>Números</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr></thead><tbody>{filteredItems.map((item) => <tr key={item.transactionId}><td><strong>{item.customer?.name || 'Participante'}</strong></td><td>{item.customer?.phone || '—'}</td><td>{(item.numbers || []).map((number) => String(number).padStart(2, '0')).join(', ') || '—'}</td><td>{formatMoney(Number(item.amountInCents || 0) / 100)}</td><td><StatusPill status={statusLabel(item.status)} /></td><td>{dateLabel(item.createdAt)}</td><td><div className="dashboard-participant-actions">{item.status === 'PENDING' && <button className="dashboard-row-action" type="button" onClick={() => { setActionError(''); setConfirming(item); }}>Confirmar pagamento</button>}{item.status === 'CONFIRMED' && <button className="dashboard-row-action" type="button" onClick={() => setReceipt(item)}>Ver comprovante</button>}</div></td></tr>)}</tbody></table>{loading && <p className="dashboard-empty">Carregando participações...</p>}{!loading && !filteredItems.length && !error && <p className="dashboard-empty">Nenhuma participação encontrada para esta rifa.</p>}</div>
+        {filteredItems.some((item) => ['UNDER_REVIEW', 'UNDER_REVIEW_EXPIRED', 'RESOLUTION_REQUIRED'].includes(item.status)) && <div className="proof-review-list"><h3>Comprovantes e pendências financeiras</h3>{filteredItems.filter((item) => ['UNDER_REVIEW', 'UNDER_REVIEW_EXPIRED', 'RESOLUTION_REQUIRED'].includes(item.status)).map((item) => <article className="proof-review-card" key={`review-${item.transactionId}`}><div className="proof-review-card__details"><StatusPill status={statusLabel(item.status)} /><strong>{item.customer?.name || 'Participante'} · {formatMoney(Number(item.amountInCents || 0) / 100)}</strong><span>Números: {(item.numbers || []).map((number) => String(number).padStart(2, '0')).join(', ')}</span><small>{item.paymentProofSubmittedAt ? `Enviado ${dateLabel(item.paymentProofSubmittedAt)}` : dateLabel(item.createdAt)}</small>{item.paymentProofConflictNumbers?.length > 0 && <p className="proof-review-card__conflict">Números comprometidos: {item.paymentProofConflictNumbers.map((number) => String(number).padStart(2, '0')).join(', ')}. Aprovação bloqueada. Reembolso registrado: {item.refundResolutionStatus === 'REFUNDED' ? 'confirmado pelo organizador' : item.refundResolutionStatus === 'NOT_REQUIRED' ? 'marcado como não necessário' : 'pendente'}.</p>}{item.refundResolutionNote && <small>Observação: {item.refundResolutionNote}</small>}</div>{item.paymentProofUrl && <div className="proof-review-card__attachments"><a className="proof-review-card__proof" href={item.paymentProofUrl} target="_blank" rel="noreferrer" aria-label="Abrir comprovante em outra aba"><img src={item.paymentProofUrl} alt="Comprovante enviado pelo participante" loading="lazy" /><span>Visualizar comprovante</span></a>{item.paymentProofDownloadUrl && <a className="proof-review-card__download" href={item.paymentProofDownloadUrl}>Baixar arquivo</a>}</div>}<div className="proof-review-card__actions">{item.status !== 'RESOLUTION_REQUIRED' && <><button className="button" type="button" onClick={() => { setActionError(''); setConfirming(item); }}>Aprovar pagamento</button><button className="dashboard-period" type="button" onClick={() => { setActionError(''); setRejectNote('Comprovante não validado pelo organizador.'); setProofToReject(item); }}>Rejeitar comprovante</button></>}{item.status === 'RESOLUTION_REQUIRED' && <button className="button" type="button" onClick={() => { setActionError(''); setRefundResolutionStatus(item.refundResolutionStatus || 'PENDING'); setRefundResolutionNote(item.refundResolutionNote || ''); setResolving(item); }}>Registrar resolução financeira</button>}</div></article>)}</div>}
+        <div className="dashboard-table-wrap"><table className="dashboard-table"><thead><tr><th>Participante</th><th>Telefone</th><th>Números</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr></thead><tbody>{filteredItems.map((item) => <tr key={item.transactionId}><td><strong>{item.customer?.name || 'Participante'}</strong></td><td>{item.customer?.phone || '—'}</td><td>{(item.numbers || []).map((number) => String(number).padStart(2, '0')).join(', ') || '—'}</td><td>{formatMoney(Number(item.amountInCents || 0) / 100)}</td><td><StatusPill status={statusLabel(item.status, item)} /></td><td>{dateLabel(item.createdAt)}</td><td><div className="dashboard-participant-actions">{item.status === 'PENDING' && <button className="dashboard-row-action" type="button" onClick={() => { setActionError(''); setConfirming(item); }}>Confirmar pagamento</button>}{item.status === 'CONFIRMED' && <button className="dashboard-row-action" type="button" onClick={() => setReceipt(item)}>Ver comprovante</button>}{item.paymentProofReviewHistory?.length > 0 && <button className="dashboard-row-action" type="button" onClick={() => setHistoryItem(item)}>Histórico do comprovante</button>}</div></td></tr>)}</tbody></table>{loading && <p className="dashboard-empty">Carregando participações...</p>}{!loading && !filteredItems.length && !error && <p className="dashboard-empty">Nenhuma participação encontrada para esta rifa.</p>}</div>
         {nextToken && <div className="dashboard-load-more"><button className="dashboard-period" type="button" onClick={() => loadPage(true)} disabled={loading}>{loading ? 'Carregando...' : 'Carregar mais'}</button></div>}
       </section>}
-    {confirming && <div className="dashboard-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingTransactionId) setConfirming(null); }}><section className="dashboard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-payment-title"><button className="dashboard-dialog__close" type="button" onClick={() => setConfirming(null)} disabled={Boolean(savingTransactionId)} aria-label="Fechar confirmação">×</button><p className="section-kicker">Ação financeira</p><h2 id="confirm-payment-title">Confirmar pagamento recebido?</h2><p className="dashboard-dialog__description">Confirme somente depois de verificar o recebimento por outro meio. Esta ação registra a participação como paga e libera os números para o sorteio.</p><dl className="dashboard-dialog__summary"><div><dt>Participante</dt><dd>{confirming.customer?.name || 'Participante'}</dd></div><div><dt>Números</dt><dd>{(confirming.numbers || []).map((number) => String(number).padStart(2, '0')).join(', ')}</dd></div><div><dt>Valor</dt><dd>{formatMoney(Number(confirming.amountInCents || 0) / 100)}</dd></div></dl>{actionError && <p className="organizer-auth__error" role="alert">{actionError}</p>}<div className="dashboard-dialog__actions"><button className="dashboard-period" type="button" onClick={() => setConfirming(null)} disabled={Boolean(savingTransactionId)}>Voltar</button><button className="button" type="button" onClick={confirmPayment} disabled={Boolean(savingTransactionId)}>{savingTransactionId ? 'Confirmando...' : 'Confirmar recebimento'}</button></div></section></div>}
+    {confirming && <div className="dashboard-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingTransactionId) setConfirming(null); }}><section className="dashboard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-payment-title"><button className="dashboard-dialog__close" type="button" onClick={() => setConfirming(null)} disabled={Boolean(savingTransactionId)} aria-label="Fechar confirmação">×</button><p className="section-kicker">Ação financeira</p><h2 id="confirm-payment-title">{confirming.status === 'PENDING' ? 'Confirmar pagamento recebido?' : 'Aprovar pagamento após análise?'}</h2><p className="dashboard-dialog__description">{confirming.status === 'PENDING' ? 'Confirme somente depois de verificar o recebimento por outro meio.' : 'A aprovação valida novamente todos os números e só é concluída se nenhum deles estiver comprometido. O comprovante enviado não confirma o pagamento sozinho.'}</p><dl className="dashboard-dialog__summary"><div><dt>Participante</dt><dd>{confirming.customer?.name || 'Participante'}</dd></div><div><dt>Números</dt><dd>{(confirming.numbers || []).map((number) => String(number).padStart(2, '0')).join(', ')}</dd></div><div><dt>Valor</dt><dd>{formatMoney(Number(confirming.amountInCents || 0) / 100)}</dd></div></dl>{actionError && <p className="organizer-auth__error" role="alert">{actionError}</p>}<div className="dashboard-dialog__actions"><button className="dashboard-period" type="button" onClick={() => setConfirming(null)} disabled={Boolean(savingTransactionId)}>Voltar</button><button className="button" type="button" onClick={confirmPayment} disabled={Boolean(savingTransactionId)}>{savingTransactionId ? 'Confirmando...' : 'Aprovar pagamento'}</button></div></section></div>}
+    {proofToReject && <div className="dashboard-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingTransactionId) setProofToReject(null); }}><section className="dashboard-dialog" role="alertdialog" aria-modal="true" aria-labelledby="reject-proof-title"><button className="dashboard-dialog__close" type="button" onClick={() => setProofToReject(null)} disabled={Boolean(savingTransactionId)} aria-label="Fechar">×</button><p className="section-kicker">Análise de comprovante</p><h2 id="reject-proof-title">Rejeitar este comprovante?</h2><p className="dashboard-dialog__description">A decisão fica registrada. Se a reserva ainda estiver válida, o participante poderá enviar outro arquivo.</p><label className="organizer-field"><span>Motivo ou observação</span><textarea value={rejectNote} onChange={(event) => setRejectNote(event.target.value)} maxLength={300} rows={3} /></label>{actionError && <p className="organizer-auth__error" role="alert">{actionError}</p>}<div className="dashboard-dialog__actions"><button className="dashboard-period" type="button" onClick={() => setProofToReject(null)} disabled={Boolean(savingTransactionId)}>Voltar</button><button className="button" type="button" onClick={rejectProof} disabled={Boolean(savingTransactionId)}>{savingTransactionId ? 'Registrando...' : 'Rejeitar comprovante'}</button></div></section></div>}
+    {resolving && <div className="dashboard-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !savingTransactionId) setResolving(null); }}><section className="dashboard-dialog" role="dialog" aria-modal="true" aria-labelledby="resolve-proof-title"><button className="dashboard-dialog__close" type="button" onClick={() => setResolving(null)} disabled={Boolean(savingTransactionId)} aria-label="Fechar">×</button><p className="section-kicker">Resolução financeira</p><h2 id="resolve-proof-title">Acompanhar conflito de números</h2><p className="dashboard-dialog__description">O pagamento não foi aprovado porque pelo menos um número pertence a outra compra. Registre o andamento sem marcar um reembolso como feito antes que ele ocorra.</p><label className="organizer-field"><span>Status da resolução</span><select value={refundResolutionStatus} onChange={(event) => setRefundResolutionStatus(event.target.value)}><option value="PENDING">Pendente</option><option value="REFUNDED">Reembolso realizado</option><option value="NOT_REQUIRED">Resolução sem reembolso</option></select></label><label className="organizer-field"><span>Observação</span><textarea value={refundResolutionNote} onChange={(event) => setRefundResolutionNote(event.target.value)} maxLength={300} rows={3} /></label>{actionError && <p className="organizer-auth__error" role="alert">{actionError}</p>}<div className="dashboard-dialog__actions"><button className="dashboard-period" type="button" onClick={() => setResolving(null)} disabled={Boolean(savingTransactionId)}>Cancelar</button><button className="button" type="button" onClick={saveResolution} disabled={Boolean(savingTransactionId)}>{savingTransactionId ? 'Salvando...' : 'Salvar resolução'}</button></div></section></div>}
+    {historyItem && <div className="dashboard-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHistoryItem(null); }}><section className="dashboard-dialog" role="dialog" aria-modal="true" aria-labelledby="proof-history-title"><button className="dashboard-dialog__close" type="button" onClick={() => setHistoryItem(null)} aria-label="Fechar histórico">×</button><p className="section-kicker">Rastreabilidade</p><h2 id="proof-history-title">Histórico do comprovante</h2><p className="dashboard-dialog__description">{historyItem.customer?.name || 'Participante'} · pedido {String(historyItem.transactionId).slice(0, 8)}</p><ol className="proof-review-history">{(historyItem.paymentProofReviewHistory || []).map((entry, index) => <li key={`${entry.occurredAt}-${index}`}><strong>{{ PENDING: 'Enviado para análise', REJECTED: 'Rejeitado', APPROVED: 'Pagamento aprovado', RESOLUTION_REQUIRED: 'Conflito de números' }[entry.status] || entry.status}</strong><time>{dateLabel(entry.occurredAt)}</time>{entry.note && <p>{entry.note}</p>}</li>)}</ol><div className="dashboard-dialog__actions"><button className="button" type="button" onClick={() => setHistoryItem(null)}>Fechar</button></div></section></div>}
     {receipt && <ParticipantReceipt item={receipt} raffleTitle={receipt.raffleTitle || activeRaffle?.title || 'Rifa RIFOU'} onClose={() => setReceipt(null)} />}
   </>;
 }
@@ -1317,6 +1414,11 @@ const auditActionLabels = {
   RAFFLE_STATUS_CHANGED: 'Status alterado',
   FEATURED_RAFFLE_CHANGED: 'Destaque alterado',
   PAYMENT_CONFIRMED_MANUALLY: 'Pagamento confirmado manualmente',
+  PAYMENT_CONFIRMED_FROM_PROOF: 'Pagamento aprovado após análise do comprovante',
+  PAYMENT_PROOF_REJECTED: 'Comprovante rejeitado',
+  PAYMENT_NUMBER_CONFLICT: 'Conflito de números identificado',
+  PAYMENT_RESOLUTION_UPDATED: 'Resolução financeira atualizada',
+  MARKETING_CONTACTS_ASSIGNED: 'Lista de contatos atualizada',
   RAFFLE_DRAWN: 'Sorteio realizado',
   RAFFLE_COMPLETED: 'Rifa concluída automaticamente',
   ORGANIZER_SETTINGS_UPDATED: 'Configuração de rifas atualizada',
@@ -1396,11 +1498,15 @@ function AuditSection({ raffles }) {
       const changes = details.changes || {};
       return Object.entries(changes).map(changeLabel).join(' · ') || `Campos: ${(details.changedFields || []).join(', ') || 'dados da rifa'}`;
     }
-    if (item.action === 'PAYMENT_CONFIRMED_MANUALLY') return `Pedido ${String(details.transactionId || '').slice(0, 8)} · ${(details.numbers || []).map((number) => String(number).padStart(2, '0')).join(', ')} · ${formatMoney(Number(details.amountInCents || 0) / 100)}`;
+    if (['PAYMENT_CONFIRMED_MANUALLY', 'PAYMENT_CONFIRMED_FROM_PROOF'].includes(item.action)) return `Pedido ${String(details.transactionId || '').slice(0, 8)} · ${(details.numbers || []).map((number) => String(number).padStart(2, '0')).join(', ')} · ${formatMoney(Number(details.amountInCents || 0) / 100)}`;
+    if (item.action === 'PAYMENT_PROOF_REJECTED') return `Pedido ${String(details.transactionId || '').slice(0, 8)} · ${details.note || 'Sem observação.'}`;
+    if (item.action === 'PAYMENT_NUMBER_CONFLICT') return `Pedido ${String(details.transactionId || '').slice(0, 8)} · Números comprometidos: ${(details.conflictNumbers || []).map((number) => String(number).padStart(2, '0')).join(', ')}`;
+    if (item.action === 'PAYMENT_RESOLUTION_UPDATED') return `Pedido ${String(details.transactionId || '').slice(0, 8)} · ${details.refundStatus || 'PENDENTE'} · ${details.note || ''}`;
+    if (item.action === 'MARKETING_CONTACTS_ASSIGNED') return `${Number(details.contactCount || 0)} contato(s) · ${details.whatsappList || 'Removido da lista'}`;
     if (item.action === 'RAFFLE_DRAWN') return `Número sorteado: ${String(details.winningNumber || '—').padStart(2, '0')}`;
     if (item.action === 'RAFFLE_COMPLETED') return 'A rifa saiu do histórico público após o prazo configurado.';
     if (item.action === 'ORGANIZER_SETTINGS_UPDATED') return `Conclusão automática após ${details.completionDelayDays || '—'} dias.`;
-    if (item.action === 'FEATURED_RAFFLE_CHANGED') return details.nextFeaturedRaffleId ? 'Rifa selecionada para destaque na página inicial.' : 'Destaque removido da página inicial.';
+    if (item.action === 'FEATURED_RAFFLE_CHANGED') return details.nextFeaturedRaffleId ? 'Rifa selecionada para destaque no perfil público.' : 'Destaque removido do perfil público.';
     if (item.action === 'SUPPORT_TICKET_CREATED') return `Protocolo ${String(details.ticketId || '').slice(0, 8).toUpperCase()} · ${details.subject || ''}`;
     if (item.action === 'RAFFLE_CREATED') return `Status inicial: ${details.status || '—'}`;
     return '';
@@ -1615,6 +1721,68 @@ function SettingsSection({ user, setNotice, onProfileUpdated }) {
   </>;
 }
 
+function PublicProfileSection({ raffles, setNotice }) {
+  const [profile, setProfile] = useState({ publicId: '', publicName: '', message: '', logoUrl: '', featuredRaffleIds: [] });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [logoFile, setLogoFile] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    organizerApi('/api/organizador/public-profile')
+      .then((result) => { if (active) setProfile(result.profile); })
+      .catch((loadError) => { if (active) setError(loadError.message || 'Não foi possível carregar o perfil público.'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const eligibleRaffles = raffles.filter((raffle) => ['Ativa', 'Sorteada'].includes(raffle.status) && raffle.status !== 'Concluída');
+  const toggleFeatured = (raffleId) => setProfile((current) => {
+    const selected = current.featuredRaffleIds.includes(raffleId);
+    if (!selected && current.featuredRaffleIds.length >= 20) {
+      setNotice('Você pode destacar até 20 rifas no perfil público.');
+      return current;
+    }
+    return { ...current, featuredRaffleIds: selected ? current.featuredRaffleIds.filter((id) => id !== raffleId) : [...current.featuredRaffleIds, raffleId] };
+  });
+
+  const save = async (event) => {
+    event.preventDefault(); setSaving(true); setError(''); setNotice('');
+    try {
+      let logoUrl = profile.logoUrl;
+      if (logoFile) logoUrl = await uploadRaffleImage(logoFile, '/api/organizador/profile-image/upload-url');
+      const result = await organizerApi('/api/organizador/public-profile', {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...profile, logoUrl }),
+      });
+      setProfile(result.profile); setLogoFile(null); setNotice('Perfil público atualizado.');
+    } catch (saveError) { setError(saveError.message || 'Não foi possível salvar o perfil público.'); }
+    finally { setSaving(false); }
+  };
+
+  const copyProfileLink = async () => {
+    if (!profile.publicId) return;
+    const url = `${window.location.origin}/organizadores/${profile.publicId}`;
+    try { await navigator.clipboard.writeText(url); setNotice('Link do perfil copiado.'); }
+    catch { setNotice(`Compartilhe este link: ${url}`); }
+  };
+
+  return <><DashboardHeading eyebrow="Vitrine do organizador" title="Perfil público" description="Personalize a página que você pode compartilhar. Suas rifas em destaque aparecem no seu perfil." action={!loading && profile.publicId ? <button className="dashboard-period" type="button" onClick={copyProfileLink}>Copiar link público</button> : null} />
+    {error && <p className="organizer-auth__error" role="alert">{error}</p>}
+    {loading ? <p className="organizer-auth__notice" role="status">Carregando perfil público…</p> : <form className="public-profile-editor" onSubmit={save}>
+      <section className="dashboard-card dashboard-settings-card"><div className="public-profile-editor__intro"><div className="public-profile-heading__logo">{profile.logoUrl ? <img src={profile.logoUrl} alt="Logotipo atual do perfil" /> : <span>{profile.publicName?.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || 'R'}</span>}</div><div><h2>Identidade pública</h2><p>Link permanente: <a href={`/organizadores/${profile.publicId}`} target="_blank" rel="noreferrer">/organizadores/{profile.publicId}</a></p></div></div>
+        <label className="organizer-field"><span>Nome público</span><input value={profile.publicName} onChange={(event) => setProfile((current) => ({ ...current, publicName: event.target.value }))} minLength={2} maxLength={80} required /></label>
+        <label className="organizer-field"><span>Mensagem de apresentação</span><textarea value={profile.message} onChange={(event) => setProfile((current) => ({ ...current, message: event.target.value }))} maxLength={400} rows={4} placeholder="Conte brevemente sobre você ou sua loja." /></label>
+        <label className="organizer-field"><span>Logotipo ou imagem de identificação</span><input type="file" accept="image/jpeg,image/png,image/webp,image/avif" onChange={(event) => setLogoFile(event.target.files?.[0] || null)} /><small>JPG, PNG, WebP ou AVIF de até 5 MB. {logoFile?.name || ''}</small></label>
+        <button className="button" type="submit" disabled={saving}>{saving ? 'Salvando…' : 'Salvar perfil'}</button>
+      </section>
+      <section className="dashboard-card dashboard-settings-card"><h2>Rifas em destaque no seu perfil</h2><p>Selecione campanhas ativas ou sorteadas que ainda estejam públicas. A seleção não altera a Home principal do Rifou.</p>{eligibleRaffles.length ? <div className="public-profile-raffle-options">{eligibleRaffles.map((raffle) => <label key={raffle.id}><input type="checkbox" checked={profile.featuredRaffleIds.includes(raffle.id)} onChange={() => toggleFeatured(raffle.id)} /><span><strong>{raffle.title}</strong><small>{raffle.status} · {raffle.numberCount} números</small></span></label>)}</div> : <p className="dashboard-empty">Você ainda não tem rifas ativas ou sorteadas públicas.</p>}</section>
+      {error && <p className="organizer-auth__error" role="alert">{error}</p>}
+    </form>}
+  </>;
+}
+
 function CreateRaffleSection({ raffle, onSubmit, onCancel, saving }) {
   const unitPriceInCents = raffle ? Number(raffle.priceInCents || 0) : 1000;
   const numberCount = raffle?.numberCount || 100;
@@ -1625,7 +1793,6 @@ function CreateRaffleSection({ raffle, onSubmit, onCancel, saving }) {
   const [unitPriceValue, setUnitPriceValue] = useState(formatCurrencyField(unitPriceInCents));
   const [numberCountValue, setNumberCountValue] = useState(String(numberCount));
   const [formStatus, setFormStatus] = useState(raffleStatusValue);
-  const [featuredValue, setFeaturedValue] = useState(Boolean(raffle?.featured));
   const [selectedImageName, setSelectedImageName] = useState('');
   const [pricingError, setPricingError] = useState('');
   const calculatedUnitPriceInCents = parseCurrencyToCents(unitPriceValue);
@@ -1640,7 +1807,6 @@ function CreateRaffleSection({ raffle, onSubmit, onCancel, saving }) {
     : parseCurrencyToCents(prizeValueValue);
   const updateStatus = (value) => {
     setFormStatus(value);
-    if (value !== 'ACTIVE') setFeaturedValue(false);
   };
   const formatUnitPrice = () => setUnitPriceValue(formatCurrencyField(parseCurrencyToCents(unitPriceValue)));
   const formatPrizeValue = () => setPrizeValueValue(formatCurrencyField(parseCurrencyToCents(prizeValueValue)));
@@ -1694,7 +1860,6 @@ function CreateRaffleSection({ raffle, onSubmit, onCancel, saving }) {
     <label className="organizer-field"><span>Máximo de números por participante</span><input name="maxNumbersPerUser" type="number" min="1" max="97" defaultValue={raffle?.maxNumbersPerUser || 2} required /><small>Limite acumulado por telefone nesta rifa, incluindo reservas e compras confirmadas. Não pode superar a quantidade de números.</small></label>
     <label className="organizer-field"><span>Imagem do prêmio</span><span className="dashboard-image-upload"><input className="dashboard-image-upload__input" aria-label="Selecionar imagem do prêmio" name="imageFile" type="file" accept="image/jpeg,image/png,image/webp,image/avif" onChange={(event) => setSelectedImageName(event.target.files?.[0]?.name || '')} required={!raffle?.image} /><span className="dashboard-image-upload__icon"><DashIcon name="upload" size={20} /></span><span className="dashboard-image-upload__copy"><strong>{selectedImageName || (raffle?.image ? 'Substituir imagem atual' : 'Escolha uma imagem para o prêmio')}</strong><small>{selectedImageName ? 'Arquivo selecionado. Clique para trocar.' : 'JPG, PNG, WebP ou AVIF · até 5 MB'}</small></span><span className="dashboard-image-upload__button">{selectedImageName ? 'Trocar imagem' : 'Escolher arquivo'}</span></span>{raffle?.image && <><input type="hidden" name="image" defaultValue={raffle.image} /><img className="dashboard-image-preview" src={raffle.image} alt={raffle.imageAlt || ''} /></>}</label>
     <label className="organizer-field"><span>Texto alternativo da imagem</span><input name="imageAlt" type="text" defaultValue={raffle?.imageAlt || ''} maxLength={200} placeholder="Descrição da imagem" /></label>
-    <label className="dashboard-featured-option"><input name="featured" type="checkbox" checked={featuredValue} onChange={(event) => setFeaturedValue(event.target.checked)} disabled={Boolean(raffle?.drawResult)} /><span><strong>Colocar esta rifa em destaque na página inicial</strong><small>O destaque é único para o site e substitui a rifa atualmente selecionada. Somente rifas ativas podem ficar em destaque.</small></span></label>
     <div className="dashboard-form-row"><label className="organizer-field"><span>Data prevista do sorteio</span><input name="date" type="date" defaultValue={raffle?.drawingDate || ''} /></label><label className="organizer-field"><span>Status</span><select name="status" value={formStatus} onChange={(event) => updateStatus(event.target.value)}><option value="DRAFT" disabled={Boolean(raffle?.drawResult)}>Rascunho</option><option value="ACTIVE" disabled={Boolean(raffle?.drawResult)}>Ativa e pública</option><option value="INACTIVE">Inativa</option>{raffle?.drawResult && <option value="DRAWN">Sorteada</option>}</select>{raffle?.drawResult && <small>Uma rifa sorteada não pode ser reativada. Você pode mantê-la no histórico ou inativá-la.</small>}</label></div>
     <p className="dashboard-create-form__note">Ao escolher “Ativa e pública”, a rifa aparece no catálogo. Após a primeira reserva, o preço e a quantidade ficam travados permanentemente.</p>
     <div className="dashboard-create-form__actions"><button className="dashboard-period" type="button" onClick={onCancel} disabled={saving}>Cancelar</button><button className="button" type="submit" disabled={saving || Boolean(pricingError)}>{saving ? 'Salvando...' : <><DashIcon name={raffle ? 'check' : 'plus'} size={17} /> {raffle ? 'Salvar alterações' : 'Criar rifa'}</>}</button></div>

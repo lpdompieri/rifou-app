@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
@@ -29,6 +29,10 @@ async function getParticipantId(phone) {
   });
   const secret = await participantLimitHashSecretPromise;
   return createHmac('sha256', secret).update(phone, 'utf8').digest('hex');
+}
+
+function hashPurchaseCode(code) {
+  return participantLimitHashSecretPromise.then((secret) => createHmac('sha256', secret).update(code, 'utf8').digest('hex'));
 }
 
 function purchaseLimitError({ maxNumbersPerUser, alreadyCounted, requested }) {
@@ -160,9 +164,12 @@ export const handler = async (event) => {
     const expiresAt = Date.now() + RESERVATION_DURATION_MS;
     const expiresAtEpoch = Math.ceil(expiresAt / 1000);
     const transactionId = randomUUID();
+    const purchaseCode = `RF-${randomBytes(16).toString('hex').toUpperCase()}`;
+    const purchaseCodeHash = await hashPurchaseCode(purchaseCode);
     const createdAt = new Date(createdAtEpoch * 1000).toISOString();
     const order = {
       transactionId,
+      purchaseCodeHash,
       raffleId,
       participantId,
       participantCountTracked: true,
@@ -180,7 +187,7 @@ export const handler = async (event) => {
       expiresAtEpoch,
       isDemo: true,
     };
-    const copyPasteCode = `RIFOU-DEMO|PEDIDO:${transactionId}|RIFA:${raffleId}|NUMEROS:${numbers.join('-')}|VALOR:${(amountInCents / 100).toFixed(2)}`;
+    const copyPasteCode = `RIFOU-DEMO|PEDIDO:${purchaseCode}|RIFA:${raffleId}|NUMEROS:${numbers.join('-')}|VALOR:${(amountInCents / 100).toFixed(2)}`;
     const now = new Date().toISOString();
 
     const numberUpdates = numbers.map((number) => ({
@@ -265,7 +272,7 @@ export const handler = async (event) => {
 
     return json(201, {
       item: {
-        transactionId,
+        purchaseCode,
         raffleId,
         numbers,
         quantity: numbers.length,

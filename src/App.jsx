@@ -204,7 +204,7 @@ function RaffleCard({ raffle }) {
     <article className="raffle-card">
       <a className="raffle-card__image-wrap" href={detailUrl} aria-label={`Ver detalhes: ${raffle.title}`}>
         <img src={raffle.image} alt={raffle.imageAlt} className="raffle-card__image" />
-        <span className="raffle-card__badge">Ativa</span>
+        <span className="raffle-card__badge">{raffle.status === 'DRAWN' ? 'Sorteada' : 'Ativa'}</span>
       </a>
       <div className="raffle-card__body">
         <p className="raffle-card__organizer">{raffle.organizer}</p>
@@ -290,7 +290,8 @@ function Header({ menuOpen, setMenuOpen }) {
         </button>
         <nav className={`main-nav${menuOpen ? ' main-nav--open' : ''}`} aria-label="Navegação principal">
           <a href="/" onClick={closeMenu}>Início</a>
-          <a href="/rifas" onClick={closeMenu}>Rifas ativas</a>
+          <a href="/rifas" onClick={closeMenu}>Ver rifas</a>
+          <a href="/consultar-compra" onClick={closeMenu}>Consultar compra</a>
           <a href="/#como-funciona" onClick={closeMenu}>Como funciona</a>
           <a className="main-nav__login" href="/organizador/login" onClick={closeMenu}>Entrar</a>
           <a className="button button--small" href="/rifas" onClick={closeMenu}>Ver rifas</a>
@@ -311,7 +312,8 @@ function SiteFooter({ showNotice }) {
           </div>
           <div className="footer-column">
             <h2>Plataforma</h2>
-            <a href="/rifas">Rifas ativas</a>
+            <a href="/rifas">Ver rifas</a>
+            <a href="/consultar-compra">Consultar compra</a>
             <a href="/#como-funciona">Como funciona</a>
             <button type="button" onClick={() => showNotice('Mais informações sobre segurança em breve.')}>Segurança</button>
           </div>
@@ -341,29 +343,40 @@ function SiteFooter({ showNotice }) {
 }
 
 function RafflesPage({ raffles, drawnRaffles }) {
+  const [search, setSearch] = useState('');
+  const normalizedSearch = search.trim().toLocaleLowerCase('pt-BR');
+  const visibleRaffles = normalizedSearch
+    ? raffles.filter((raffle) => [raffle.title, raffle.organizer, raffle.description, raffle.prizeValue]
+      .some((value) => String(value || '').toLocaleLowerCase('pt-BR').includes(normalizedSearch)))
+    : raffles;
+  const visibleDrawnRaffles = normalizedSearch
+    ? drawnRaffles.filter((raffle) => [raffle.title, raffle.organizer, raffle.description, raffle.drawResult?.winnerName]
+      .some((value) => String(value || '').toLocaleLowerCase('pt-BR').includes(normalizedSearch)))
+    : drawnRaffles;
   return (
     <main className="catalog-page">
       <div className="container">
         <nav className="breadcrumbs" aria-label="Navegação estrutural">
-          <a href="/">Início</a><Icon name="arrow" size={14} /><span>Rifas ativas</span>
+          <a href="/">Início</a><Icon name="arrow" size={14} /><span>Ver rifas</span>
         </nav>
         <section className="catalog-heading">
           <div>
             <p className="section-kicker">Oportunidades RIFOU</p>
-            <h1>Rifas ativas</h1>
-            <p>Encontre seu próximo prêmio e acompanhe cada etapa com transparência.</p>
+            <h1>Ver rifas</h1>
+            <p>Pesquise campanhas, escolha seus números e acompanhe os resultados com transparência.</p>
           </div>
-          <span className="catalog-heading__count">{raffles.length} rifas disponíveis</span>
+          <label className="catalog-search"><Icon name="search" size={18} /><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por rifa ou organizador" aria-label="Buscar rifas" /></label>
+          <span className="catalog-heading__count">{visibleRaffles.length} rifas disponíveis</span>
         </section>
-        {raffles.length ? (
+        {visibleRaffles.length ? (
           <div className="raffle-grid">
-            {raffles.map((raffle) => <RaffleCard key={raffle.id} raffle={raffle} />)}
+            {visibleRaffles.map((raffle) => <RaffleCard key={raffle.id} raffle={raffle} />)}
           </div>
         ) : (
-          <p className="raffles-empty">Não há rifas ativas no momento. Volte em breve para conferir novas oportunidades.</p>
+          <p className="raffles-empty">{normalizedSearch ? 'Nenhuma rifa corresponde à sua busca.' : 'Não há rifas ativas no momento. Volte em breve para conferir novas oportunidades.'}</p>
         )}
       </div>
-      <DrawnRafflesSection raffles={drawnRaffles} />
+      <DrawnRafflesSection raffles={visibleDrawnRaffles} />
     </main>
   );
 }
@@ -437,6 +450,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
   const [formError, setFormError] = useState('');
   const [isGeneratingPix, setIsGeneratingPix] = useState(false);
   const [pixOrder, setPixOrder] = useState(null);
+  const autoDownloadedPurchaseCode = useRef('');
   const [copyMessage, setCopyMessage] = useState('');
   const [now, setNow] = useState(Date.now());
   const totalNumbers = Number(raffle.numbers);
@@ -470,6 +484,16 @@ function RaffleDetailsPage({ raffle, showNotice }) {
     const intervalId = window.setInterval(updateCountdown, 1000);
     return () => window.clearInterval(intervalId);
   }, [checkoutStep, pixOrder]);
+
+  useEffect(() => {
+    if (checkoutStep !== 'pix' || !pixOrder?.purchaseCode || remainingSeconds <= 0
+      || autoDownloadedPurchaseCode.current === pixOrder.purchaseCode) return undefined;
+    autoDownloadedPurchaseCode.current = pixOrder.purchaseCode;
+    window.setTimeout(() => {
+      savePaymentImage(pixOrder, raffle).catch(() => showNotice('O navegador não permitiu o download automático. Use “Salvar QR e dados da compra”.'));
+    }, 0);
+    return undefined;
+  }, [checkoutStep, pixOrder, raffle, remainingSeconds]);
 
   useEffect(() => {
     if (raffle.status !== 'ACTIVE') return undefined;
@@ -609,6 +633,12 @@ function RaffleDetailsPage({ raffle, showNotice }) {
     }
   };
 
+  const copyPurchaseCode = async () => {
+    if (!pixOrder?.purchaseCode) return;
+    try { await navigator.clipboard.writeText(pixOrder.purchaseCode); setCopyMessage('Código da compra copiado.'); }
+    catch { setCopyMessage('Não foi possível copiar automaticamente. Selecione o código da compra e copie.'); }
+  };
+
   if (checkoutStep === 'identification') {
     return (
       <main className="checkout-page">
@@ -657,7 +687,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
                 </div>
                 <div className="checkout-privacy-note">
                   <span><Icon name="shield" size={18} /></span>
-                  <div><strong>Dados usados nesta reserva demonstrativa</strong><small>Nome e WhatsApp serão associados ao ID da transação para identificar os números reservados.</small></div>
+                  <div><strong>Dados usados nesta reserva demonstrativa</strong><small>Nome e WhatsApp serão associados à compra para identificar os números reservados.</small></div>
                 </div>
                 {formError && <p className="checkout-error" role="alert">{formError}</p>}
                 <button className="button button--full checkout-form__submit" type="submit" disabled={isGeneratingPix}>
@@ -687,7 +717,9 @@ function RaffleDetailsPage({ raffle, showNotice }) {
               <span className="pix-card__status"><Icon name="check" size={14} /> Pix demonstrativo gerado</span>
               <h1>Seus números estão pré-reservados</h1>
               <p className="pix-card__intro">Esta reserva demonstrativa vale por 15 minutos. O QR code não aceita pagamento.</p>
-              <p className="pix-card__intro">ID da transação: <strong>{pixOrder.id}</strong></p>
+              <p className="pix-card__intro">Código da compra: <strong>{pixOrder.purchaseCode}</strong></p>
+              <button className="dashboard-period" type="button" onClick={copyPurchaseCode}>Copiar código da compra</button>
+              <a className="text-link" href={`/consultar-compra?codigo=${encodeURIComponent(pixOrder.purchaseCode)}`}>Consultar esta compra</a>
               <div className={`reservation-timer${remainingSeconds === 0 ? ' reservation-timer--expired' : ''}`}>
                 <span>{remainingSeconds === 0 ? 'Prazo demonstrativo encerrado' : 'Tempo restante da reserva'}</span>
                 <strong>{countdownLabel}</strong>
@@ -714,6 +746,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
                   {copyMessage.startsWith('Código demonstrativo copiado') ? 'Código copiado' : 'Copiar código demonstrativo'}
                 </button>
                 {copyMessage && <p className="pix-copy-field__message" role="status">{copyMessage}</p>}
+                <button className="dashboard-period payment-save-button" type="button" onClick={() => savePaymentImage(pixOrder, raffle).catch(() => showNotice('Não foi possível gerar a imagem da compra neste navegador.'))}>Salvar QR e dados da compra</button>
               </div>
               <div className="pix-demo-warning">
                 <strong>Simulação — não é uma cobrança válida.</strong>
@@ -884,6 +917,150 @@ function NotFoundPage() {
   );
 }
 
+function HomePage() {
+  return <main className="platform-home">
+    <section className="platform-hero">
+      <div className="container platform-hero__grid">
+        <div className="platform-hero__copy">
+          <p className="section-kicker">Rifou · plataforma de rifas</p>
+          <h1>Rifas bem organizadas.<br /><span>Participação simples.</span></h1>
+          <p>O Rifou ajuda organizadores a administrar campanhas com clareza e dá aos participantes um jeito fácil de escolher números e acompanhar cada etapa.</p>
+          <div className="platform-hero__actions"><a className="button" href="/rifas">Ver rifas <Icon name="arrow" size={18} /></a><a className="text-link" href="/consultar-compra">Consultar compra</a></div>
+          <a className="platform-organizer-link" href="/organizador/solicitar-acesso">Quero organizar minhas rifas <Icon name="arrow" size={16} /></a>
+        </div>
+        <div className="platform-hero__visual" aria-label="Resumo da plataforma Rifou">
+          <div className="platform-hero__ticket"><span className="platform-hero__ticket-icon"><Icon name="ticket" size={27} /></span><div><small>Uma jornada mais clara</small><strong>Escolha, acompanhe, confira.</strong></div><span className="platform-hero__check"><Icon name="check" size={18} /></span></div>
+          <div className="platform-hero__features"><div><Icon name="shield" size={19} /><span><strong>Organização</strong><small>Reservas e pagamentos acompanhados</small></span></div><div><Icon name="eye" size={19} /><span><strong>Transparência</strong><small>Resultados e histórico acessíveis</small></span></div><div><Icon name="search" size={19} /><span><strong>Acesso fácil</strong><small>Encontre campanhas e compras</small></span></div></div>
+        </div>
+      </div>
+    </section>
+    <section className="platform-audience section"><div className="container"><div className="section-heading"><p className="section-kicker">Para cada lado da rifa</p><h2>Mais clareza em toda a jornada</h2></div><div className="platform-audience__grid"><article><span>01</span><h3>Para quem organiza</h3><p>Crie rifas, acompanhe reservas, confira participantes e consulte os resultados em um só painel.</p><a href="/organizador/solicitar-acesso">Conheça o painel <Icon name="arrow" size={16} /></a></article><article><span>02</span><h3>Para quem participa</h3><p>Veja rifas disponíveis, escolha números livres e consulte o andamento da sua compra com um código próprio.</p><a href="/rifas">Encontrar uma rifa <Icon name="arrow" size={16} /></a></article></div></div></section>
+    <section className="platform-how section" id="como-funciona"><div className="container"><div className="section-heading"><p className="section-kicker">Como funciona</p><h2>Uma jornada em passos simples</h2></div><div className="platform-how__grid"><article><span>1</span><h3>Encontre uma rifa</h3><p>Pesquise pelo nome da campanha ou do organizador.</p></article><article><span>2</span><h3>Escolha seus números</h3><p>A disponibilidade é validada novamente quando a reserva é criada.</p></article><article><span>3</span><h3>Acompanhe sua compra</h3><p>Guarde o código da compra para consultar o status e os números selecionados.</p></article></div><div className="platform-payment-note"><Icon name="shield" size={19} /><p><strong>Sobre pagamentos:</strong> o fluxo Pix deste ambiente ainda é demonstrativo e não recebe valores. Uma reserva não significa pagamento confirmado.</p></div></div></section>
+    <section className="platform-cta"><div className="container"><div><p className="section-kicker">Comece por aqui</p><h2>Pronto para encontrar sua próxima rifa?</h2><p>Consulte o catálogo público ou procure uma compra pelo código.</p></div><div><a className="button" href="/rifas">Ver rifas <Icon name="arrow" size={18} /></a><a className="platform-cta__link" href="/consultar-compra">Consultar compra</a></div></div></section>
+  </main>;
+}
+
+const purchaseStatusLabel = {
+  PENDING: 'Aguardando pagamento',
+  UNDER_REVIEW: 'Comprovante enviado · análise pendente',
+  EXPIRED: 'Reserva expirada',
+  CONFIRMED: 'Pagamento confirmado',
+  RESOLUTION_REQUIRED: 'Precisa de resolução pelo organizador',
+  UNDER_REVIEW_EXPIRED: 'Reserva expirada · comprovante em análise',
+};
+
+function PublicPurchasePage() {
+  const [code, setCode] = useState('');
+  const [purchase, setPurchase] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [uploading, setUploading] = useState(false);
+
+  useEffect(() => {
+    const queryCode = new URLSearchParams(window.location.search).get('codigo') || '';
+    if (queryCode) setCode(queryCode.toUpperCase());
+  }, []);
+
+  const lookup = async (event) => {
+    event?.preventDefault();
+    const normalizedCode = code.trim().toUpperCase().replace(/\s+/g, '');
+    setError(''); setNotice(''); setPurchase(null);
+    if (!/^RF-[A-F0-9]{32}$/.test(normalizedCode)) { setError('Confira o código. Ele começa com RF- e contém 32 caracteres.'); return; }
+    setLoading(true);
+    try {
+      const response = await fetch(`/api/purchases/${encodeURIComponent(normalizedCode)}`, { cache: 'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || 'Não foi possível localizar esta compra.');
+      setPurchase(payload.item);
+    } catch (lookupError) { setError(lookupError.message || 'Não foi possível consultar a compra.'); }
+    finally { setLoading(false); }
+  };
+
+  const submitProof = async (event) => {
+    event.preventDefault();
+    const file = event.currentTarget.elements.proof.files?.[0];
+    if (!file || !purchase) return;
+    if (file.size > 5 * 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp', 'image/avif'].includes(file.type)) {
+      setError('Escolha uma imagem JPG, PNG, WebP ou AVIF de até 5 MB.'); return;
+    }
+    setUploading(true); setError(''); setNotice('');
+    try {
+      const endpoint = `/api/purchases/${encodeURIComponent(purchase.purchaseCode)}`;
+      const authorizationResponse = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'request-upload', contentType: file.type, size: file.size }) });
+      const authorization = await authorizationResponse.json().catch(() => ({}));
+      if (!authorizationResponse.ok) throw new Error(authorization.message || 'Não foi possível iniciar o envio.');
+      const form = new FormData();
+      Object.entries(authorization.upload.fields).forEach(([key, value]) => form.append(key, value));
+      form.append('file', file);
+      const uploadResponse = await fetch(authorization.upload.url, { method: 'POST', body: form });
+      if (!uploadResponse.ok) throw new Error('O arquivo não foi aceito pelo armazenamento. Tente novamente.');
+      const submitResponse = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'submit-proof', objectKey: authorization.upload.objectKey }) });
+      const submitted = await submitResponse.json().catch(() => ({}));
+      if (!submitResponse.ok) throw new Error(submitted.message || 'Não foi possível associar o comprovante à compra.');
+      await lookup();
+      setNotice('Comprovante enviado. O organizador precisa validar o pagamento manualmente.');
+    } catch (uploadError) { setError(uploadError.message || 'Não foi possível enviar o comprovante.'); }
+    finally { setUploading(false); }
+  };
+
+  return <main className="public-purchase-page"><div className="container public-purchase-page__container"><nav className="breadcrumbs" aria-label="Navegação estrutural"><a href="/">Início</a><Icon name="arrow" size={14} /><span>Consultar compra</span></nav><header><p className="section-kicker">Acompanhamento público</p><h1>Consultar compra</h1><p>Informe o código recebido ao iniciar sua reserva. Não é necessário entrar ou criar uma conta.</p></header><form className="public-purchase-search" onSubmit={lookup}><label htmlFor="purchase-code">Código da compra</label><div><input id="purchase-code" value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} autoComplete="off" placeholder="RF-00000000000000000000000000000000" maxLength={35} required /><button className="button" type="submit" disabled={loading}>{loading ? 'Consultando…' : 'Consultar'}</button></div><small>O código é único e não revela seus dados de contato.</small></form>{error && <p className="checkout-error" role="alert">{error}</p>}{notice && <p className="dashboard-notice" role="status">{notice}</p>}{purchase && <section className="public-purchase-result" aria-live="polite"><div className="public-purchase-result__heading"><div><p className="section-kicker">{purchase.purchaseCode}</p><h2>{purchase.raffleTitle}</h2><p>Organizada por {purchase.organizer}</p></div><span className={`public-purchase-status public-purchase-status--${purchase.status.toLowerCase()}`}>{purchaseStatusLabel[purchase.status] || purchaseStatusLabel.PENDING}</span></div><dl><div><dt>Números selecionados</dt><dd>{purchase.numbers.map((number) => String(number).padStart(2, '0')).join(', ')}</dd></div><div><dt>Valor total</dt><dd>{formatCurrency(purchase.amountInCents / 100)}</dd></div><div><dt>Data da compra</dt><dd>{purchase.createdAt ? new Date(purchase.createdAt).toLocaleString('pt-BR', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}</dd></div><div><dt>Status da rifa</dt><dd>{purchase.raffleStatus === 'ACTIVE' ? 'Ativa' : purchase.raffleStatus === 'DRAWN' ? 'Sorteada' : purchase.raffleStatus}</dd></div>{purchase.paymentConfirmedAt && <div><dt>Pagamento confirmado</dt><dd>{new Date(purchase.paymentConfirmedAt).toLocaleString('pt-BR', { dateStyle: 'medium', timeStyle: 'short' })}</dd></div>}</dl>{purchase.proofReviewStatus === 'REJECTED' && purchase.status === 'PENDING' && <p className="proof-review-card__conflict">O organizador rejeitou o último comprovante{purchase.proofReviewNote ? `: ${purchase.proofReviewNote}` : '.'} {purchase.canSubmitProof ? 'Você pode enviar outra imagem enquanto a reserva estiver válida.' : ''}</p>}{purchase.status === 'RESOLUTION_REQUIRED' && <p className="proof-review-card__conflict">Números comprometidos: {purchase.conflictNumbers.map((number) => String(number).padStart(2, '0')).join(', ') || 'consulte o organizador'}. A aprovação foi bloqueada. Resolução financeira: {purchase.refundResolutionStatus === 'REFUNDED' ? 'reembolso registrado pelo organizador' : purchase.refundResolutionStatus === 'NOT_REQUIRED' ? 'marcada como não necessária' : 'pendente'}.</p>}{purchase.result && <div className={`public-purchase-result__winner${purchase.result.participantWon ? ' public-purchase-result__winner--won' : ''}`}><strong>{purchase.result.participantWon ? 'Você foi o ganhador!' : 'Resultado do sorteio'}</strong><span>Número {String(purchase.result.number).padStart(2, '0')} · {purchase.result.winnerName}</span><small>{purchase.result.drawnAt ? formatDrawDateTime(purchase.result.drawnAt) : ''}</small></div>}{purchase.isDemo && <p className="platform-payment-note"><Icon name="shield" size={18} /><span>Este pedido foi criado em modo demonstrativo. O QR Pix não aceita pagamentos.</span></p>}{purchase.canSubmitProof && <form className="public-proof-form" onSubmit={submitProof}><label htmlFor="purchase-proof">Enviar imagem do comprovante</label><input id="purchase-proof" name="proof" type="file" accept="image/jpeg,image/png,image/webp,image/avif" required /><small>O envio não confirma o pagamento. O organizador analisará o arquivo e validará novamente a disponibilidade dos números.</small><button className="button" type="submit" disabled={uploading}>{uploading ? 'Enviando…' : 'Enviar para análise'}</button></form>}<a className="text-link" href={`/rifas/${encodeURIComponent(purchase.raffleId)}`}>Ver página da rifa <Icon name="arrow" size={16} /></a></section>}</div></main>;
+}
+
+function PublicOrganizerPage({ publicId }) {
+  const [profile, setProfile] = useState(null);
+  const [raffles, setRaffles] = useState([]);
+  const [request, setRequest] = useState({ status: 'loading' });
+  const [retry, setRetry] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/organizadores/${encodeURIComponent(publicId)}`, { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.message || 'Perfil público não encontrado.');
+        setProfile(payload.profile || null);
+        setRaffles(Array.isArray(payload.items) ? payload.items : []);
+        setRequest({ status: 'ready' });
+      })
+      .catch((error) => { if (!controller.signal.aborted) setRequest({ status: 'error', message: error.message }); });
+    return () => controller.abort();
+  }, [publicId, retry]);
+
+  if (request.status !== 'ready') return <main className="public-profile-page"><div className="container">{request.status === 'loading' ? <p className="raffles-empty" role="status">Carregando perfil…</p> : <div className="raffles-empty" role="alert"><h1>Este perfil não está disponível.</h1><p>{request.message}</p><button className="button" type="button" onClick={() => setRetry((value) => value + 1)}>Tentar novamente</button></div>}</div></main>;
+  const featured = raffles.filter((raffle) => raffle.featured);
+  const other = raffles.filter((raffle) => !raffle.featured && raffle.status === 'ACTIVE');
+  const otherDrawn = raffles.filter((raffle) => !raffle.featured && raffle.status === 'DRAWN');
+  return <main className="public-profile-page"><div className="container"><section className="public-profile-heading"><div className="public-profile-heading__logo">{profile.logoUrl ? <img src={profile.logoUrl} alt={`Logotipo de ${profile.publicName}`} /> : <span>{profile.publicName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase()}</span>}</div><div><p className="section-kicker">Perfil público do organizador</p><h1>{profile.publicName}</h1><p>{profile.message || 'Confira as rifas ativas e os resultados deste organizador.'}</p></div><a className="public-profile-heading__consult" href="/consultar-compra">Consultar compra</a></section>{featured.length > 0 && <section className="section public-profile-raffles"><div className="section-heading"><p className="section-kicker">Selecionadas pelo organizador</p><h2>Rifas em destaque</h2></div><div className="raffle-grid">{featured.map((raffle) => <RaffleCard key={raffle.id} raffle={raffle} />)}</div></section>}<section className="section public-profile-raffles"><div className="section-heading"><p className="section-kicker">Campanhas públicas</p><h2>{featured.length ? 'Todas as rifas' : 'Rifas e resultados'}</h2></div>{other.length ? <div className="raffle-grid">{other.map((raffle) => <RaffleCard key={raffle.id} raffle={raffle} />)}</div> : !featured.length ? <p className="raffles-empty">Este organizador ainda não tem rifas públicas disponíveis.</p> : null}</section><DrawnRafflesSection raffles={featured.filter((raffle) => raffle.status === 'DRAWN').concat(otherDrawn)} /></div></main>;
+}
+
+async function savePaymentImage(order, raffle) {
+  const svg = document.querySelector('.pix-card__qr svg');
+  if (!svg) return;
+  const markup = new XMLSerializer().serializeToString(svg);
+  const source = new Image();
+  const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    await new Promise((resolve, reject) => { source.onload = resolve; source.onerror = reject; source.src = objectUrl; });
+    const canvas = document.createElement('canvas'); canvas.width = 1000; canvas.height = 1320;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = '#163d2c'; context.font = 'bold 42px Arial'; context.fillText('RIFOU · RESERVA DEMONSTRATIVA', 58, 90);
+    context.fillStyle = '#17251d'; context.font = 'bold 34px Arial'; context.fillText(raffle.title.slice(0, 38), 58, 160);
+    context.drawImage(source, 205, 205, 590, 590);
+    context.fillStyle = '#17251d'; context.font = 'bold 30px Arial'; context.fillText(`Compra: ${order.purchaseCode}`, 58, 860);
+    context.font = '26px Arial'; context.fillText(`Números: ${order.numbers.join(', ')}`, 58, 920);
+    context.fillText(`Total: ${formatCurrency(order.amountInCents / 100)}`, 58, 980);
+    context.fillStyle = '#a34129'; context.font = 'bold 24px Arial'; context.fillText('Este QR não recebe pagamentos.', 58, 1090);
+    const image = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!image) throw new Error('Não foi possível gerar a imagem.');
+    const downloadUrl = URL.createObjectURL(image); const link = document.createElement('a');
+    link.href = downloadUrl; link.download = `rifou-compra-${order.purchaseCode}.png`; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1500);
+  } finally { URL.revokeObjectURL(objectUrl); }
+}
+
 function RafflesLoadState({ error, onRetry }) {
   return (
     <main className="raffles-state">
@@ -918,16 +1095,16 @@ function App() {
   const noticeTimeout = useRef(null);
   const pathname = usePathname() || '/';
   const currentPath = pathname.replace(/\/+$/, '') || '/';
-  const isOrganizerRoute = currentPath.startsWith('/organizador');
+  const isOrganizerRoute = currentPath === '/organizador' || currentPath.startsWith('/organizador/');
   const detailMatch = currentPath.match(/^\/rifas\/([^/]+)$/);
+  const organizerProfileMatch = currentPath.match(/^\/organizadores\/([A-F0-9]{32})$/i);
   const raffleIdFromPath = detailMatch?.[1] || '';
-  const isCatalogRoute = currentPath === '/' || currentPath === '/rifas';
+  const isCatalogRoute = currentPath === '/rifas';
   const selectedRaffle = detailMatch ? raffleDetail : null;
-  const featuredRaffle = raffles.find((raffle) => raffle.featured);
-  const otherHomeRaffles = raffles.filter((raffle) => raffle.id !== featuredRaffle?.id);
   const pageTitle = selectedRaffle
     ? `${selectedRaffle.title} | RIFOU`
-    : currentPath === '/rifas' ? 'Rifas ativas | RIFOU'
+    : currentPath === '/rifas' ? 'Ver rifas | RIFOU'
+      : currentPath === '/consultar-compra' ? 'Consultar compra | RIFOU'
       : isOrganizerRoute ? `${currentPath === '/organizador/dashboard' ? 'Painel do organizador' : 'Acesso do organizador'} | RIFOU`
         : 'RIFOU — App de Rifas';
 
@@ -942,58 +1119,27 @@ function App() {
     const loadRaffles = async () => {
       setRafflesRequest({ status: 'loading' });
       try {
-        const [response, featuredResponse, drawnResponse] = await Promise.all([
-          fetch('/api/raffles?status=ACTIVE', {
-            method: 'GET',
-            cache: 'no-store',
-            signal: controller.signal,
-          }),
-          fetch('/api/raffles?status=ACTIVE&featured=true&limit=1', {
-            method: 'GET',
-            cache: 'no-store',
-            signal: controller.signal,
-          }).catch((error) => {
-            if (!controller.signal.aborted) console.warn('Não foi possível consultar a rifa em destaque.', error);
-            return null;
-          }),
-          fetch(`/api/raffles?status=DRAWN&limit=${currentPath === '/' ? 6 : 50}`, {
-            method: 'GET',
-            cache: 'no-store',
-            signal: controller.signal,
-          }).catch((error) => {
-            if (!controller.signal.aborted) console.warn('Não foi possível consultar o histórico de rifas sorteadas.', error);
-            return null;
-          }),
-        ]);
-        const payload = await response.json();
-        if (!response.ok) {
-          throw new Error(payload.message || 'Falha ao buscar rifas.');
-        }
-        if (!Array.isArray(payload.items)) {
-          throw new Error('A resposta da API de rifas é inválida.');
-        }
-        let featuredItem = null;
-        if (featuredResponse) {
-          try {
-            const featuredPayload = await featuredResponse.json();
-            if (featuredResponse.ok && Array.isArray(featuredPayload.items)) {
-              featuredItem = featuredPayload.items.find((item) => item.featured) || null;
-            } else {
-              console.warn('Não foi possível consultar a rifa em destaque.', featuredPayload.message || featuredResponse.status);
-            }
-          } catch (error) {
-            if (!controller.signal.aborted) console.warn('Resposta inválida ao consultar a rifa em destaque.', error);
-          }
-        }
-        const otherRaffles = payload.items.filter((item) => item.id !== featuredItem?.id);
-        setRaffles(featuredItem ? [featuredItem, ...otherRaffles] : otherRaffles);
-        if (drawnResponse?.ok) {
-          const drawnPayload = await drawnResponse.json().catch(() => ({}));
-          setDrawnRaffles(Array.isArray(drawnPayload.items) ? drawnPayload.items : []);
-        } else {
-          setDrawnRaffles([]);
-          if (drawnResponse && !controller.signal.aborted) console.warn('A API de histórico de rifas sorteadas respondeu com erro.', drawnResponse.status);
-        }
+      const loadAllPublicRaffles = async (status) => {
+        const items = [];
+        let nextToken = null;
+        do {
+          const query = new URLSearchParams({ status, limit: '50' });
+          if (nextToken) query.set('nextToken', nextToken);
+          const response = await fetch(`/api/raffles?${query}`, { method: 'GET', cache: 'no-store', signal: controller.signal });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.message || 'Falha ao buscar rifas.');
+          if (!Array.isArray(payload.items)) throw new Error('A resposta da API de rifas é inválida.');
+          items.push(...payload.items);
+          nextToken = payload.nextToken || null;
+        } while (nextToken && !controller.signal.aborted);
+        return items;
+      };
+      const [activeItems, drawnItems] = await Promise.all([
+        loadAllPublicRaffles('ACTIVE'),
+        loadAllPublicRaffles('DRAWN'),
+      ]);
+      setRaffles(activeItems);
+      setDrawnRaffles(drawnItems);
         setRafflesRequest({ status: 'ready' });
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -1057,98 +1203,16 @@ function App() {
     );
   }
 
+  if (!isOrganizerRoute && currentPath === '/') return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><HomePage /><SiteFooter showNotice={showNotice} /></>;
+  if (!isOrganizerRoute && currentPath === '/consultar-compra') return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><PublicPurchasePage /><SiteFooter showNotice={showNotice} /></>;
+  if (!isOrganizerRoute && organizerProfileMatch) return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><PublicOrganizerPage publicId={organizerProfileMatch[1].toUpperCase()} /><SiteFooter showNotice={showNotice} /></>;
+
   return (
     <>
       {!isOrganizerRoute && <Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} />}
 
       {isOrganizerRoute ? (
         <OrganizerRoutes currentPath={currentPath} />
-      ) : currentPath === '/' ? (
-      <main>
-        <section className="hero" id="inicio">
-          <div className="hero__orb hero__orb--one" aria-hidden="true" />
-          <div className="hero__orb hero__orb--two" aria-hidden="true" />
-          <div className="container hero__layout">
-            <div className="hero__copy">
-              <div className="eyebrow-pill"><Icon name="shield" size={15} /> Simples, seguro e transparente</div>
-              <h1>Sua próxima conquista pode estar a <span>um número</span> de distância.</h1>
-              <p className="hero__description">
-                Participe das melhores rifas ou crie a sua com total controle, transparência e segurança do início ao fim.
-              </p>
-              <div className="hero__actions">
-                <a className="button" href="#rifas">Explorar rifas <Icon name="arrow" size={18} /></a>
-                <a className="text-link" href="#como-funciona"><span className="text-link__icon"><Icon name="eye" size={19} /></span> Ver como funciona</a>
-              </div>
-              <div className="social-proof">
-                <div className="social-proof__avatars" aria-hidden="true">
-                  <span>CM</span><span>MA</span><span>AR</span>
-                </div>
-                <div><strong>+12 mil participantes</strong><span>Confiam no RIFOU todos os meses</span></div>
-              </div>
-            </div>
-
-            <div className="hero__visual">
-              {featuredRaffle && <article className="featured-card" id="rifa-destaque">
-                <div className="featured-card__image-wrap">
-                  <img src={featuredRaffle.image} alt={featuredRaffle.imageAlt || featuredRaffle.title} className="featured-card__image" />
-                  <div className="protected-badge"><span><Icon name="shield" size={18} /></span><div><strong>Compra protegida</strong><small>Pagamento seguro via Pix</small></div></div>
-                </div>
-                <div className="featured-card__body">
-                  <div className="featured-card__topline">
-                    <div><p className="featured-card__label">Rifa em destaque</p><h2>{featuredRaffle.title}</h2><p className="featured-card__organizer">por {featuredRaffle.organizer}</p></div>
-                    <div className="featured-card__price"><span>Por apenas</span><strong>R$ {featuredRaffle.price}</strong></div>
-                  </div>
-                  <Progress value={featuredRaffle.cardSold ?? featuredRaffle.sold} />
-                  <a className="button button--full" href={`/rifas/${featuredRaffle.id}`}>
-                    Quero participar <Icon name="arrow" size={19} />
-                  </a>
-                </div>
-              </article>}
-            </div>
-          </div>
-        </section>
-
-        <section className="raffles-section section" id="rifas">
-          <div className="container">
-            <div className="section-heading section-heading--row">
-              <div>
-                <p className="section-kicker">Oportunidades em destaque</p>
-                <h2>Outras rifas para você</h2>
-              </div>
-              <a className="section-heading__link" href="/rifas">Ver todas as rifas <Icon name="arrow" size={17} /></a>
-            </div>
-            {otherHomeRaffles.length ? (
-              <div className="raffle-grid">
-                {otherHomeRaffles.map((raffle) => <RaffleCard key={raffle.id} raffle={raffle} />)}
-              </div>
-            ) : (
-              <p className="raffles-empty">A rifa em destaque está disponível acima. Novas rifas aparecerão aqui.</p>
-            )}
-          </div>
-        </section>
-
-        <DrawnRafflesSection raffles={drawnRaffles} compact />
-
-        <section className="how-section section" id="como-funciona">
-          <div className="container">
-            <div className="how-section__heading">
-              <p className="section-kicker">É fácil participar</p>
-              <h2>Três passos. Uma grande chance.</h2>
-              <p>Sem cadastro, sem burocracia. Escolha, pague e acompanhe.</p>
-            </div>
-            <div className="steps-grid">
-              {steps.map((step) => (
-                <article className="step-card" key={step.number}>
-                  <span className="step-card__icon"><Icon name={step.icon} size={20} /></span>
-                  <span className="step-card__number">{step.number}</span>
-                  <h3>{step.title}</h3>
-                  <p>{step.description}</p>
-                </article>
-              ))}
-            </div>
-          </div>
-        </section>
-      </main>
       ) : currentPath === '/rifas' ? (
         <RafflesPage raffles={raffles} drawnRaffles={drawnRaffles} />
       ) : selectedRaffle ? (

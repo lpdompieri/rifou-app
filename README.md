@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # RIFOU — App de Rifas
 
 Aplicação web do RIFOU em Next.js, com o fluxo público de participação e a área autenticada do organizador.
@@ -51,6 +50,8 @@ Aplicação web do RIFOU em Next.js, com o fluxo público de participação e a 
 - `app/layout.jsx`: layout global e importação dos estilos.
 - `app/[[...slug]]/page.jsx`: mantém as rotas existentes do protótipo dentro do App Router.
 - `app/api/raffles/`: rotas BFF para listar rifas, buscar um detalhe, consultar uma página de números e criar um pedido Pix demonstrativo.
+- `app/api/purchases/` e `app/api/organizadores/`: consulta pública de compras e perfis dos organizadores.
+- `app/api/organizador/`: APIs autenticadas para gestão de perfil, comprovantes e contatos.
 - `src/App.jsx`: experiência pública, seleção de números e etapas de identificação e pagamento.
 - `src/OrganizerApp.jsx`: painel autenticado para rifas, participantes, financeiro, destaque e sorteios.
 - `src/styles.css`: identidade visual e layout responsivo.
@@ -61,7 +62,13 @@ Aplicação web do RIFOU em Next.js, com o fluxo público de participação e a 
 O login do organizador, a recuperação de senha e as APIs do painel usam Cognito e AWS. O QR code e o código Pix desta etapa são demonstrativos e não aceitam pagamentos. A confirmação manual permite concluir testes da jornada enquanto a integração com um parceiro pagador não existe.
 
 O organizador pode conduzir o sorteio na seção “Sorteios” depois da data prevista, quando não houver reservas pendentes e existir pelo menos um número com pagamento confirmado. O resultado fica registrado na rifa e aparece no histórico público com o número sorteado, o primeiro nome e a inicial do sobrenome do ganhador, além da data e hora.
-=======
-# rifou
-APP de Rifa
->>>>>>> ab194412a9b5ef44cda37d7054fa3fc982c1f600
+
+### Novas jornadas públicas e do organizador
+
+- A página inicial apresenta a plataforma e encaminha participantes ao catálogo pesquisável. O catálogo permite filtrar por campanha e organizador.
+- Cada reserva recebe um código público aleatório; use `/consultar-compra` para acompanhar status, números, comprovante em análise e resultado do sorteio.
+- O envio de imagem fica privado no S3 e exige validação manual pelo organizador. A aprovação confere novamente a disponibilidade dos números; conflitos ficam pendentes de resolução financeira.
+- Cada organizador pode publicar um perfil com identidade, mensagem e rifas selecionadas em `/organizadores/{id}`.
+- A seção “Marketing” reúne contatos que já fizeram reservas, indica recorrência e permite organizar listas e exportar CSV. O painel não envia mensagens.
+
+O fluxo Pix continua demonstrativo e não se conecta a um provedor de pagamento. Comprovantes servem para análise manual e não confirmam pagamentos automaticamente.
