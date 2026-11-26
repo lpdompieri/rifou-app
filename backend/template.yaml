@@ -13,7 +13,7 @@ Metadata:
       - Confirmação manual só pode converter uma reserva PENDING ainda válida; pedido, números e contadores mudam atomicamente.
       - Pix gerado por esta stack é fictício e não pode ser apresentado como cobrança válida.
       - O bucket de imagens permanece privado; imagens públicas são entregues somente pelo CloudFront com OAC.
-      - A seleção de destaque é global e única enquanto o produto opera com um único cliente.
+          - Cada organizador administra os destaques do próprio perfil público; a Home da plataforma não usa destaque global.
       - O valor do prêmio deve ser igual ao preço unitário multiplicado pela quantidade de números.
       - Ações mutáveis do organizador devem registrar auditoria e gravar histórico junto com a alteração de negócio.
       - Organizadores só consultam seus próprios chamados de suporte e eventos de auditoria.
@@ -333,6 +333,16 @@ Resources:
             Condition:
               StringEquals:
                 AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${RaffleImagesDistribution}'
+          - Sid: AllowCloudFrontReadOrganizerProfileImages
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - s3:GetObject
+            Resource: !Sub '${RaffleImagesBucket.Arn}/organizer-profile-images/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${RaffleImagesDistribution}'
   RaffleNumbersTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -369,6 +379,8 @@ Resources:
           AttributeType: S
         - AttributeName: expiresAtEpoch
           AttributeType: N
+        - AttributeName: purchaseCodeHash
+          AttributeType: S
       KeySchema:
         - AttributeName: transactionId
           KeyType: HASH
@@ -392,6 +404,12 @@ Resources:
             NonKeyAttributes:
               - raffleId
               - numbers
+        - IndexName: PurchasesByCodeHashIndex
+          KeySchema:
+            - AttributeName: purchaseCodeHash
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
 
   RaffleParticipantLimitsTable:
     Type: AWS::DynamoDB::Table
@@ -487,6 +505,47 @@ Resources:
           Projection:
             ProjectionType: ALL
 
+  OrganizerProfilesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub rifou-organizer-profiles-${EnvironmentName}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: organizerSub
+          AttributeType: S
+        - AttributeName: publicId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: organizerSub
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ProfilesByPublicIdIndex
+          KeySchema:
+            - AttributeName: publicId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  OrganizerContactsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub rifou-organizer-contact-lists-${EnvironmentName}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: organizerSub
+          AttributeType: S
+        - AttributeName: contactId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: organizerSub
+          KeyType: HASH
+        - AttributeName: contactId
+          KeyType: RANGE
+
   ParticipantLimitHashSecret:
     Type: AWS::SecretsManager::Secret
     DeletionPolicy: Retain
@@ -558,6 +617,37 @@ Resources:
             Path: /api/v1/raffles
             Method: GET
 
+  PublicOrganizerProfilesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub rifou-public-organizer-profiles-${EnvironmentName}
+      CodeUri: src/functions/public-organizer-profiles/
+      Handler: index.handler
+      Environment:
+        Variables:
+          ORGANIZER_PROFILES_TABLE: !Ref OrganizerProfilesTable
+          PUBLIC_PROFILES_INDEX: ProfilesByPublicIdIndex
+          RAFFLES_TABLE: !Ref RafflesTable
+          ORGANIZER_RAFFLES_INDEX: OrganizerRafflesByOwnerIndex
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: FindPublicOrganizerProfileById
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource:
+                - !Sub '${OrganizerProfilesTable.Arn}/index/ProfilesByPublicIdIndex'
+                - !Sub '${RafflesTable.Arn}/index/OrganizerRafflesByOwnerIndex'
+      Events:
+        GetPublicOrganizerProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/organizers/{publicId}
+            Method: GET
+
   OrganizerRafflesFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -574,6 +664,9 @@ Resources:
           APP_CONFIG_TABLE: !Ref RaffleAppConfigTable
           AUDIT_EVENTS_TABLE: !Ref RaffleAuditEventsTable
           ORGANIZER_SUPPORT_TICKETS_TABLE: !Ref OrganizerSupportTicketsTable
+          PARTICIPANT_LIMITS_TABLE: !Ref RaffleParticipantLimitsTable
+          ORGANIZER_PROFILES_TABLE: !Ref OrganizerProfilesTable
+          ORGANIZER_CONTACTS_TABLE: !Ref OrganizerContactsTable
           ORGANIZER_RAFFLES_INDEX: OrganizerRafflesByOwnerIndex
           RAFFLE_TRANSACTIONS_INDEX: RaffleTransactionsByCreatedAtIndex
           FEATURED_RAFFLES_INDEX: FeaturedRafflesIndex
@@ -608,11 +701,33 @@ Resources:
                 - dynamodb:PutItem
                 - dynamodb:UpdateItem
               Resource: !GetAtt RaffleAppConfigTable.Arn
+            - Sid: ManageOrganizerPublicProfile
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !GetAtt OrganizerProfilesTable.Arn
+            - Sid: ManageOrganizerContactListAssignments
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+              Resource: !GetAtt OrganizerContactsTable.Arn
             - Sid: PresignOrganizerRaffleImageUploads
               Effect: Allow
               Action:
                 - s3:PutObject
               Resource: !Sub '${RaffleImagesBucket.Arn}/raffle-images/*'
+            - Sid: PresignOrganizerPublicProfileImageUploads
+              Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: !Sub '${RaffleImagesBucket.Arn}/organizer-profile-images/*'
+            - Sid: ReadPrivateOrganizerPaymentProofs
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub '${RaffleImagesBucket.Arn}/payment-proofs/*'
             - Sid: QueryOwnedRaffleTransactions
               Effect: Allow
               Action:
@@ -654,9 +769,15 @@ Resources:
             - Sid: ManageConfirmedRaffleNumberParticipation
               Effect: Allow
               Action:
+                - dynamodb:BatchGetItem
                 - dynamodb:UpdateItem
                 - dynamodb:ConditionCheckItem
               Resource: !GetAtt RaffleNumbersTable.Arn
+            - Sid: MaintainParticipantPurchaseLimitsDuringProofReview
+              Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt RaffleParticipantLimitsTable.Arn
       Events:
         GetOrganizerDashboard:
           Type: HttpApi
@@ -746,6 +867,22 @@ Resources:
             Method: POST
             Auth:
               Authorizer: OrganizerJwtAuthorizer
+        RejectOrganizerRaffleTransactionProof:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/organizer/raffles/{raffleId}/transactions/{transactionId}/proof/reject
+            Method: POST
+            Auth:
+              Authorizer: OrganizerJwtAuthorizer
+        ResolveOrganizerRaffleTransactionConflict:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/organizer/raffles/{raffleId}/transactions/{transactionId}/resolution
+            Method: POST
+            Auth:
+              Authorizer: OrganizerJwtAuthorizer
         ListOrganizerAuditEvents:
           Type: HttpApi
           Properties:
@@ -775,6 +912,46 @@ Resources:
           Properties:
             ApiId: !Ref RafflesApi
             Path: /api/v1/organizer/raffle-images/upload-url
+            Method: POST
+            Auth:
+              Authorizer: OrganizerJwtAuthorizer
+        GetOrganizerPublicProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/organizer/public-profile
+            Method: GET
+            Auth:
+              Authorizer: OrganizerJwtAuthorizer
+        UpdateOrganizerPublicProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/organizer/public-profile
+            Method: PUT
+            Auth:
+              Authorizer: OrganizerJwtAuthorizer
+        CreateOrganizerPublicProfileImageUpload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/organizer/profile-image/upload-url
+            Method: POST
+            Auth:
+              Authorizer: OrganizerJwtAuthorizer
+        ListOrganizerMarketingContacts:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/organizer/marketing/contacts
+            Method: GET
+            Auth:
+              Authorizer: OrganizerJwtAuthorizer
+        AssignOrganizerMarketingContacts:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/organizer/marketing/contacts
             Method: POST
             Auth:
               Authorizer: OrganizerJwtAuthorizer
@@ -896,6 +1073,64 @@ Resources:
           Properties:
             ApiId: !Ref RafflesApi
             Path: /api/v1/raffles/{raffleId}/pix-orders
+            Method: POST
+
+  PurchaseOrdersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub rifou-purchase-orders-${EnvironmentName}
+      CodeUri: src/functions/purchase-orders/
+      Handler: index.handler
+      Timeout: 15
+      Environment:
+        Variables:
+          RAFFLE_TRANSACTIONS_TABLE: !Ref RaffleTransactionsTable
+          RAFFLES_TABLE: !Ref RafflesTable
+          PURCHASE_CODE_INDEX: PurchasesByCodeHashIndex
+          PARTICIPANT_LIMIT_HASH_SECRET_ARN: !Ref ParticipantLimitHashSecret
+          RAFFLE_IMAGES_BUCKET: !Ref RaffleImagesBucket
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: FindPurchaseByOpaqueCode
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource: !Sub '${RaffleTransactionsTable.Arn}/index/PurchasesByCodeHashIndex'
+            - Sid: UpdatePublicPurchaseProofState
+              Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt RaffleTransactionsTable.Arn
+            - Sid: ReadRaffleForPurchaseStatus
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt RafflesTable.Arn
+            - Sid: SignAndVerifyPaymentProofs
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource: !Sub '${RaffleImagesBucket.Arn}/payment-proofs/*'
+            - Sid: ReadPurchaseCodeHashSecret
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref ParticipantLimitHashSecret
+      Events:
+        GetPublicPurchase:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/purchases/{purchaseCode}
+            Method: GET
+        SubmitPublicPurchaseProof:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref RafflesApi
+            Path: /api/v1/purchases/{purchaseCode}
             Method: POST
 
   CreateOrganizerAccessRequestFunction:

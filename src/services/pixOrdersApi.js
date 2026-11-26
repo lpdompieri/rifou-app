@@ -24,14 +24,15 @@ export async function createPixOrder({ raffleId, name, phone, numbers }) {
     throw error;
   }
 
-  if (!payload.item?.transactionId || !Array.isArray(payload.item.numbers)
+  if (!payload.item?.purchaseCode || !Array.isArray(payload.item.numbers)
     || typeof payload.item.copyPasteCode !== 'string' || !Number.isFinite(payload.item.expiresAt)
     || !Number.isSafeInteger(payload.item.amountInCents) || payload.item.amountInCents < 1) {
     throw new Error('A resposta da API de Pix está inválida.');
   }
 
   return {
-    id: payload.item.transactionId,
+    id: payload.item.purchaseCode,
+    purchaseCode: payload.item.purchaseCode,
     raffleId: payload.item.raffleId,
     numbers: payload.item.numbers,
     amountInCents: payload.item.amountInCents,

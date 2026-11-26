@@ -67,7 +67,7 @@ export const handler = async (event) => {
         },
       },
     }));
-    const participantLimitUpdate = order.participantCountTracked === true
+    const participantLimitUpdate = order.paymentProofPending !== true && order.participantCountTracked === true
       && typeof order.participantId === 'string'
       ? [{
         Update: {
@@ -80,6 +80,7 @@ export const handler = async (event) => {
         },
       }]
       : [];
+    const expiredOrderStatus = order.paymentProofPending === true ? 'UNDER_REVIEW_EXPIRED' : 'EXPIRED';
 
     try {
       await dynamo.send(new TransactWriteCommand({
@@ -110,7 +111,7 @@ export const handler = async (event) => {
               ConditionExpression: '#status = :pending AND expiresAtEpoch <= :nowEpoch',
               ExpressionAttributeNames: { '#status': 'status' },
               ExpressionAttributeValues: {
-                ':expired': 'EXPIRED',
+                ':expired': expiredOrderStatus,
                 ':pending': 'PENDING',
                 ':expiredAt': nowIso,
                 ':nowEpoch': nowEpoch,

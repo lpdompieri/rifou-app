@@ -1,8 +1,9 @@
-import { randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomBytes, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
-import { DynamoDBDocumentClient, GetCommand, BatchGetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { DynamoDBDocumentClient, GetCommand, BatchGetCommand, QueryCommand, TransactWriteCommand, UpdateCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 
 const tableName = process.env.RAFFLES_TABLE;
 const appConfigTable = process.env.APP_CONFIG_TABLE;
@@ -11,8 +12,11 @@ const featuredIndex = process.env.FEATURED_RAFFLES_INDEX || 'FeaturedRafflesInde
 const transactionsTable = process.env.RAFFLE_TRANSACTIONS_TABLE;
 const transactionsIndex = process.env.RAFFLE_TRANSACTIONS_INDEX || 'RaffleTransactionsByCreatedAtIndex';
 const raffleNumbersTable = process.env.RAFFLE_NUMBERS_TABLE;
+const participantLimitsTable = process.env.PARTICIPANT_LIMITS_TABLE;
 const auditEventsTable = process.env.AUDIT_EVENTS_TABLE;
 const organizerSupportTicketsTable = process.env.ORGANIZER_SUPPORT_TICKETS_TABLE;
+const organizerProfilesTable = process.env.ORGANIZER_PROFILES_TABLE;
+const organizerContactsTable = process.env.ORGANIZER_CONTACTS_TABLE;
 const organizerAuditIndex = 'OrganizerAuditEventsIndex';
 const raffleAuditIndex = 'RaffleAuditEventsIndex';
 const supportTicketsIndex = 'OrganizerSupportTicketsIndex';
@@ -304,6 +308,11 @@ const AUDIT_ACTIONS = new Set([
   'RAFFLE_STATUS_CHANGED',
   'FEATURED_RAFFLE_CHANGED',
   'PAYMENT_CONFIRMED_MANUALLY',
+  'PAYMENT_CONFIRMED_FROM_PROOF',
+  'PAYMENT_PROOF_REJECTED',
+  'PAYMENT_NUMBER_CONFLICT',
+  'PAYMENT_RESOLUTION_UPDATED',
+  'MARKETING_CONTACTS_ASSIGNED',
   'RAFFLE_DRAWN',
   'RAFFLE_COMPLETED',
   'ORGANIZER_SETTINGS_UPDATED',
@@ -1318,7 +1327,7 @@ async function drawRaffle(event, owner) {
   }
 }
 
-async function createRaffleImageUpload(event, owner) {
+async function createImageUpload(event, directory) {
   if (!imagesBucket || !imagesPublicBaseUrl) {
     return json(500, { message: 'O envio de imagens ainda não está configurado.' });
   }
@@ -1330,7 +1339,7 @@ async function createRaffleImageUpload(event, owner) {
     return json(400, { message: 'Envie uma imagem JPG, PNG, WebP ou AVIF de até 5 MB.' });
   }
 
-  const key = `raffle-images/${randomUUID()}.${extension}`;
+  const key = `${directory}/${randomUUID()}.${extension}`;
   const signedPost = await createPresignedPost(s3, {
     Bucket: imagesBucket,
     Key: key,
@@ -1348,6 +1357,236 @@ async function createRaffleImageUpload(event, owner) {
     fields: signedPost.fields,
     imageUrl: `${baseUrl}/${key}`,
   });
+}
+
+async function createRaffleImageUpload(event) {
+  return createImageUpload(event, 'raffle-images');
+}
+
+async function createPublicProfileImageUpload(event) {
+  return createImageUpload(event, 'organizer-profile-images');
+}
+
+function publicProfileResponse(item) {
+  return {
+    publicId: item.publicId,
+    publicName: item.publicName || 'Organizador',
+    message: item.message || '',
+    logoUrl: item.logoUrl || '',
+    featuredRaffleIds: Array.isArray(item.featuredRaffleIds) ? item.featuredRaffleIds : [],
+    profileUrl: `/organizadores/${item.publicId}`,
+    updatedAt: item.updatedAt || '',
+  };
+}
+
+async function getOrCreatePublicProfile(owner) {
+  if (!organizerProfilesTable) throw new Error('Organizer public profiles table is not configured.');
+  const key = { organizerSub: owner.sub };
+  const current = await dynamo.send(new GetCommand({ TableName: organizerProfilesTable, Key: key, ConsistentRead: true }));
+  if (current.Item) return current.Item;
+  const legacyFeatured = await dynamo.send(new QueryCommand({
+    TableName: tableName,
+    IndexName: ownerIndex,
+    KeyConditionExpression: '#owner = :owner',
+    ExpressionAttributeNames: { '#owner': 'organizerSub' },
+    ExpressionAttributeValues: { ':owner': owner.sub },
+    Limit: MAX_PAGE_SIZE,
+  }));
+  const now = new Date().toISOString();
+  const item = {
+    organizerSub: owner.sub,
+    publicId: randomBytes(16).toString('hex').toUpperCase(),
+    publicName: owner.email?.split('@')[0] || 'Organizador',
+    message: '',
+    logoUrl: '',
+    featuredRaffleIds: (legacyFeatured.Items || []).filter((raffle) => raffle.featured && ['ACTIVE', 'DRAWN'].includes(raffle.status)).slice(0, 20).map((raffle) => raffle.raffleId),
+    createdAt: now,
+    updatedAt: now,
+  };
+  try {
+    await dynamo.send(new PutCommand({ TableName: organizerProfilesTable, Item: item, ConditionExpression: 'attribute_not_exists(organizerSub)' }));
+    return item;
+  } catch (error) {
+    if (error?.name !== 'ConditionalCheckFailedException' && error?.name !== 'TransactionConflictException') throw error;
+    const latest = await dynamo.send(new GetCommand({ TableName: organizerProfilesTable, Key: key, ConsistentRead: true }));
+    if (latest.Item) return latest.Item;
+    throw error;
+  }
+}
+
+async function getOrganizerPublicProfile(owner) {
+  try {
+    return json(200, { profile: publicProfileResponse(await getOrCreatePublicProfile(owner)) });
+  } catch (error) {
+    if (!organizerProfilesTable) return json(500, { message: 'A personalização do perfil público ainda não está configurada.' });
+    throw error;
+  }
+}
+
+async function saveOrganizerPublicProfile(event, owner) {
+  if (!organizerProfilesTable) return json(500, { message: 'A personalização do perfil público ainda não está configurada.' });
+  const payload = readBody(event);
+  const publicName = typeof payload?.publicName === 'string' ? payload.publicName.trim().replace(/\s+/g, ' ') : '';
+  const message = typeof payload?.message === 'string' ? payload.message.trim() : '';
+  const logoUrl = typeof payload?.logoUrl === 'string' ? payload.logoUrl.trim() : '';
+  const featuredRaffleIds = payload?.featuredRaffleIds;
+  if (publicName.length < 2 || publicName.length > 80 || message.length > 400
+    || !Array.isArray(featuredRaffleIds) || featuredRaffleIds.length > 20
+    || featuredRaffleIds.some((id) => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id))
+    || new Set(featuredRaffleIds).size !== featuredRaffleIds.length) {
+    return json(400, { message: 'Confira o nome público, a apresentação e até 20 rifas em destaque.' });
+  }
+  if (logoUrl) {
+    const logoPrefix = `${imagesPublicBaseUrl?.replace(/\/+$/, '')}/organizer-profile-images/`;
+    if (!imagesPublicBaseUrl || !logoUrl.startsWith(logoPrefix) || !/\/organizer-profile-images\/[0-9a-f-]{36}\.(jpg|png|webp|avif)$/i.test(logoUrl)) {
+      return json(400, { message: 'A imagem precisa ser enviada pelo formulário de upload do perfil.' });
+    }
+  }
+  for (const raffleId of featuredRaffleIds) {
+    const raffle = await getOwnedRaffle(raffleId, owner.sub);
+    if (!raffle || !['ACTIVE', 'DRAWN'].includes(raffle.status) || (raffle.status === 'DRAWN' && !raffle.publicStatus)) {
+      return json(400, { message: 'Somente rifas ativas ou sorteadas ainda públicas podem ficar em destaque no perfil.' });
+    }
+  }
+  const current = await getOrCreatePublicProfile(owner);
+  const updatedAt = new Date().toISOString();
+  const item = { ...current, publicName, message, logoUrl, featuredRaffleIds, updatedAt };
+  await dynamo.send(new PutCommand({
+    TableName: organizerProfilesTable,
+    Item: item,
+    ConditionExpression: '#publicId = :publicId',
+    ExpressionAttributeNames: { '#publicId': 'publicId' },
+    ExpressionAttributeValues: { ':publicId': current.publicId },
+  }));
+  return json(200, { profile: publicProfileResponse(item) });
+}
+
+async function listOwnerRaffles(ownerSub) {
+  const items = [];
+  let exclusiveStartKey;
+  do {
+    const result = await dynamo.send(new QueryCommand({
+      TableName: tableName, IndexName: ownerIndex,
+      KeyConditionExpression: '#owner = :owner',
+      ExpressionAttributeNames: { '#owner': 'organizerSub' },
+      ExpressionAttributeValues: { ':owner': ownerSub },
+      Limit: MAX_PAGE_SIZE, ExclusiveStartKey: exclusiveStartKey,
+    }));
+    items.push(...(result.Items || []));
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+  return items;
+}
+
+async function listRaffleOrders(raffleId) {
+  const keys = [];
+  let exclusiveStartKey;
+  do {
+    const result = await dynamo.send(new QueryCommand({
+      TableName: transactionsTable, IndexName: transactionsIndex,
+      KeyConditionExpression: '#raffleId = :raffleId',
+      ExpressionAttributeNames: { '#raffleId': 'raffleId' },
+      ExpressionAttributeValues: { ':raffleId': raffleId },
+      Limit: MAX_PAGE_SIZE, ExclusiveStartKey: exclusiveStartKey,
+    }));
+    keys.push(...(result.Items || []).filter((item) => typeof item.transactionId === 'string').map((item) => ({ transactionId: item.transactionId })));
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+  const orders = [];
+  for (let offset = 0; offset < keys.length; offset += 100) {
+    let remaining = keys.slice(offset, offset + 100);
+    for (let attempt = 0; remaining.length && attempt < 5; attempt += 1) {
+      const batch = await dynamo.send(new BatchGetCommand({ RequestItems: { [transactionsTable]: { Keys: remaining, ConsistentRead: true } } }));
+      orders.push(...(batch.Responses?.[transactionsTable] || []));
+      remaining = batch.UnprocessedKeys?.[transactionsTable]?.Keys || [];
+      if (remaining.length && attempt < 4) await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+    if (remaining.length) throw new Error('Could not read all raffle orders for marketing contacts.');
+  }
+  return orders.filter((order) => order.raffleId === raffleId);
+}
+
+function normalizeContactPhone(value) {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) digits = digits.slice(2);
+  return digits.length === 10 || digits.length === 11 ? { digits, phone: `+55${digits}` } : null;
+}
+
+async function marketingContacts(ownerSub) {
+  if (!transactionsTable || !organizerContactsTable) return json(500, { message: 'A gestão de contatos ainda não está configurada.' });
+  const ownedRaffles = await listOwnerRaffles(ownerSub);
+  const ordersByRaffle = await Promise.all(ownedRaffles.map((raffle) => listRaffleOrders(raffle.raffleId)));
+  const contacts = new Map();
+  ordersByRaffle.flat().forEach((order) => {
+    const phone = normalizeContactPhone(order.customer?.phone);
+    if (!phone) return;
+    const contactId = typeof order.participantId === 'string' && /^[a-f0-9]{64}$/i.test(order.participantId)
+      ? order.participantId.toLowerCase()
+      : createHash('sha256').update(phone.digits).digest('hex');
+    const occurredAt = order.createdAt || '';
+    const current = contacts.get(contactId) || {
+      contactId, name: order.customer?.name || 'Participante', phone: phone.phone,
+      participationCount: 0, firstAt: occurredAt, lastAt: occurredAt, raffleIds: new Set(),
+    };
+    current.participationCount += 1;
+    current.raffleIds.add(order.raffleId);
+    if (occurredAt && (!current.firstAt || occurredAt < current.firstAt)) current.firstAt = occurredAt;
+    if (occurredAt >= current.lastAt) { current.lastAt = occurredAt; current.name = order.customer?.name || current.name; current.phone = phone.phone; }
+    contacts.set(contactId, current);
+  });
+  const membershipById = new Map();
+  let exclusiveStartKey;
+  do {
+    const result = await dynamo.send(new QueryCommand({
+      TableName: organizerContactsTable,
+      KeyConditionExpression: '#owner = :owner',
+      ExpressionAttributeNames: { '#owner': 'organizerSub' },
+      ExpressionAttributeValues: { ':owner': ownerSub },
+      Limit: MAX_PAGE_SIZE, ExclusiveStartKey: exclusiveStartKey,
+    }));
+    for (const item of result.Items || []) membershipById.set(item.contactId, item);
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+  const items = [...contacts.values()].map((contact) => {
+    const membership = membershipById.get(contact.contactId);
+    return {
+      contactId: contact.contactId,
+      name: contact.name,
+      phone: contact.phone,
+      relationshipStatus: contact.participationCount > 1 ? 'RECURRENT' : 'NEW',
+      whatsappList: membership?.whatsappList || '',
+      participationCount: contact.participationCount,
+      raffleCount: contact.raffleIds.size,
+      firstParticipationAt: contact.firstAt,
+      lastParticipationAt: contact.lastAt,
+    };
+  }).sort((first, second) => second.lastParticipationAt.localeCompare(first.lastParticipationAt));
+  return json(200, { items, count: items.length, lists: [...new Set(items.map((item) => item.whatsappList).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'pt-BR')) });
+}
+
+async function assignMarketingContacts(event, owner) {
+  if (!organizerContactsTable) return json(500, { message: 'A gestão de contatos ainda não está configurada.' });
+  const payload = readBody(event) || {};
+  const contactIds = payload.contactIds;
+  const whatsappList = typeof payload.whatsappList === 'string' ? payload.whatsappList.trim().replace(/\s+/g, ' ') : '';
+  if (!Array.isArray(contactIds) || !contactIds.length || contactIds.length > 90
+    || contactIds.some((id) => typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id))
+    || new Set(contactIds).size !== contactIds.length || whatsappList.length > 80) {
+    return json(400, { message: 'Selecione até 90 contatos e informe uma lista com até 80 caracteres.' });
+  }
+  const now = new Date().toISOString();
+  const updates = contactIds.map((contactId) => ({
+    Update: {
+      TableName: organizerContactsTable,
+      Key: { organizerSub: owner.sub, contactId: contactId.toLowerCase() },
+      UpdateExpression: whatsappList ? 'SET #list = :list, #updatedAt = :now' : 'SET #updatedAt = :now REMOVE #list',
+      ExpressionAttributeNames: { '#list': 'whatsappList', '#updatedAt': 'updatedAt' },
+      ExpressionAttributeValues: { ':now': now, ...(whatsappList ? { ':list': whatsappList } : {}) },
+    },
+  }));
+  updates.push(auditPut(owner, { action: 'MARKETING_CONTACTS_ASSIGNED', occurredAt: now, details: { contactCount: contactIds.length, whatsappList: whatsappList || '' } }));
+  await dynamo.send(new TransactWriteCommand({ TransactItems: updates }));
+  return json(200, { updatedCount: contactIds.length, whatsappList });
 }
 
 async function listCurrentlyFeaturedRaffles() {
@@ -1553,7 +1792,7 @@ async function raffleTransactions(event, ownerSub) {
     }
   }
 
-  const items = orders.filter((order) => order.raffleId === raffleId).map((order) => ({
+  const items = await Promise.all(orders.filter((order) => order.raffleId === raffleId).map(async (order) => ({
     transactionId: order.transactionId,
     raffleId: order.raffleId,
     raffleTitle: order.raffleTitle || raffle.title,
@@ -1570,8 +1809,21 @@ async function raffleTransactions(event, ownerSub) {
     expiresAt: order.expiresAt || '',
     paymentConfirmedAt: order.paymentConfirmedAt || '',
     paymentConfirmationMethod: order.paymentConfirmationMethod || '',
+    paymentProofUrl: order.paymentProofKey && imagesBucket
+      ? await getSignedUrl(s3, new GetObjectCommand({ Bucket: imagesBucket, Key: order.paymentProofKey }), { expiresIn: 300 })
+      : '',
+    paymentProofDownloadUrl: order.paymentProofKey && imagesBucket
+      ? await getSignedUrl(s3, new GetObjectCommand({ Bucket: imagesBucket, Key: order.paymentProofKey, ResponseContentDisposition: `attachment; filename="rifou-comprovante.${order.paymentProofKey.split('.').at(-1)}"` }), { expiresIn: 300 })
+      : '',
+    paymentProofSubmittedAt: order.paymentProofSubmittedAt || '',
+    paymentProofReviewedAt: order.paymentProofReviewedAt || '',
+    paymentProofReviewStatus: order.paymentProofReviewStatus || '',
+    paymentProofReviewHistory: Array.isArray(order.paymentProofReviewHistory) ? order.paymentProofReviewHistory.slice(-5) : [],
+    paymentProofConflictNumbers: Array.isArray(order.paymentProofConflictNumbers) ? order.paymentProofConflictNumbers : [],
+    refundResolutionStatus: order.refundResolutionStatus || '',
+    refundResolutionNote: order.refundResolutionNote || '',
     isDemo: Boolean(order.isDemo),
-  })).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }))).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
   return json(200, {
     raffleId,
@@ -1579,6 +1831,116 @@ async function raffleTransactions(event, ownerSub) {
     count: items.length,
     nextToken: encodeKey(result.LastEvaluatedKey),
   });
+}
+
+async function readOrderNumberStates(raffleId, numbers, transactionId) {
+  let remaining = numbers.map((number) => ({ raffleId, number }));
+  const records = [];
+  for (let attempt = 0; remaining.length && attempt < 5; attempt += 1) {
+    const batch = await dynamo.send(new BatchGetCommand({
+      RequestItems: { [raffleNumbersTable]: { Keys: remaining, ConsistentRead: true } },
+    }));
+    records.push(...(batch.Responses?.[raffleNumbersTable] || []));
+    remaining = batch.UnprocessedKeys?.[raffleNumbersTable]?.Keys || [];
+  }
+  if (remaining.length) throw new Error('Could not read all raffle number states.');
+  const byNumber = new Map(records.map((item) => [Number(item.number), item]));
+  const conflicts = numbers.filter((number) => {
+    const item = byNumber.get(number);
+    return item && !(item.status === 'AVAILABLE' || (item.status === 'RESERVED' && item.reservationId === transactionId));
+  });
+  return { byNumber, conflicts };
+}
+
+async function markProofResolutionRequired(order, raffle, owner, conflictNumbers) {
+  const now = new Date().toISOString();
+  await dynamo.send(new TransactWriteCommand({
+    TransactItems: [
+      {
+        Update: {
+          TableName: transactionsTable,
+          Key: { transactionId: order.transactionId },
+          UpdateExpression: 'SET #status = :resolution, #conflicts = :conflicts, #conflictAt = :now, #refundStatus = :pending, #expired = :expired, #reviewStatus = :resolution, #reviewHistory = list_append(if_not_exists(#reviewHistory, :empty), :entry) REMOVE #pendingStatus',
+          ConditionExpression: '(#status = :review OR #status = :reviewExpired) AND #proofKey = :proofKey',
+          ExpressionAttributeNames: { '#status': 'status', '#conflicts': 'paymentProofConflictNumbers', '#conflictAt': 'paymentProofConflictAt', '#refundStatus': 'refundResolutionStatus', '#pendingStatus': 'pendingStatus', '#proofKey': 'paymentProofKey', '#expired': 'paymentProofReservationExpired', '#reviewStatus': 'paymentProofReviewStatus', '#reviewHistory': 'paymentProofReviewHistory' },
+          ExpressionAttributeValues: { ':resolution': 'RESOLUTION_REQUIRED', ':conflicts': conflictNumbers, ':now': now, ':pending': 'PENDING', ':review': 'UNDER_REVIEW', ':reviewExpired': 'UNDER_REVIEW_EXPIRED', ':proofKey': order.paymentProofKey, ':expired': order.status === 'UNDER_REVIEW_EXPIRED', ':empty': [], ':entry': [{ status: 'RESOLUTION_REQUIRED', occurredAt: now, note: `Números comprometidos: ${conflictNumbers.join(', ')}`, proofKey: order.paymentProofKey }] },
+        },
+      },
+      auditPut(owner, {
+        action: 'PAYMENT_NUMBER_CONFLICT', raffleId: order.raffleId, raffleTitle: raffle.title || '', occurredAt: now,
+        details: { transactionId: order.transactionId, numbers: order.numbers, conflictNumbers, amountInCents: Number(order.amountInCents || 0) },
+      }),
+    ],
+  }));
+}
+
+async function confirmSubmittedProof(order, raffle, owner) {
+  if (!order.paymentProofKey || !Array.isArray(order.numbers) || order.numbers.length < 1 || order.numbers.length > MAX_NUMBERS_PER_USER) {
+    return json(409, { message: 'O comprovante ou os números desta compra não puderam ser validados.' });
+  }
+  if (raffle.status !== 'ACTIVE') {
+    return json(409, { message: 'Esta rifa já não está ativa. Não é possível aprovar a compra.' });
+  }
+  const states = await readOrderNumberStates(raffle.raffleId, order.numbers, order.transactionId);
+  if (states.conflicts.length) {
+    await markProofResolutionRequired(order, raffle, owner, states.conflicts);
+    return json(409, { code: 'NUMBER_CONFLICT', conflictNumbers: states.conflicts, message: `Os números ${states.conflicts.join(', ')} já foram reservados ou confirmados por outra compra. A aprovação foi bloqueada; registre a resolução financeira.` });
+  }
+  const heldCount = order.numbers.filter((number) => states.byNumber.get(number)?.status === 'RESERVED'
+    && states.byNumber.get(number)?.reservationId === order.transactionId).length;
+  const confirmedAt = new Date().toISOString();
+  const numberUpdates = order.numbers.map((number) => ({
+    Update: {
+      TableName: raffleNumbersTable,
+      Key: { raffleId: raffle.raffleId, number },
+      UpdateExpression: 'SET #status = :confirmed, reservationId = :transactionId REMOVE #reservedUntil, #reservedUntilEpoch',
+      ConditionExpression: 'attribute_not_exists(#status) OR #status = :available OR (#status = :reserved AND reservationId = :transactionId)',
+      ExpressionAttributeNames: { '#status': 'status', '#reservedUntil': 'reservedUntil', '#reservedUntilEpoch': 'reservedUntilEpoch' },
+      ExpressionAttributeValues: { ':confirmed': 'CONFIRMED', ':available': 'AVAILABLE', ':reserved': 'RESERVED', ':transactionId': order.transactionId },
+    },
+  }));
+  const raffleUpdateExpression = heldCount
+    ? 'SET reservedCount = reservedCount - :heldCount, #financialsLocked = :locked, #historyChecked = :checked, #updatedAt = :confirmedAt ADD confirmedCount :quantity'
+    : 'SET #financialsLocked = :locked, #historyChecked = :checked, #updatedAt = :confirmedAt ADD confirmedCount :quantity';
+  const raffleUpdate = {
+    Update: {
+      TableName: tableName,
+      Key: { raffleId: raffle.raffleId },
+      UpdateExpression: raffleUpdateExpression,
+      ConditionExpression: heldCount ? '#owner = :owner AND #status = :active AND reservedCount >= :heldCount' : '#owner = :owner AND #status = :active',
+      ExpressionAttributeNames: { '#owner': 'organizerSub', '#status': 'status', '#financialsLocked': 'financialsLocked', '#historyChecked': 'financialsHistoryChecked', '#updatedAt': 'updatedAt' },
+      ExpressionAttributeValues: {
+        ':owner': owner.sub, ':active': 'ACTIVE', ':locked': true, ':checked': true,
+        ':confirmedAt': confirmedAt, ':quantity': order.numbers.length,
+        ...(heldCount ? { ':heldCount': heldCount } : {}),
+      },
+    },
+  };
+  const orderUpdate = {
+    Update: {
+      TableName: transactionsTable,
+      Key: { transactionId: order.transactionId },
+      UpdateExpression: 'SET #status = :confirmed, #confirmedAt = :confirmedAt, #method = :method, #confirmedBy = :owner, #reviewedAt = :confirmedAt, #proofPending = :false, #reviewStatus = :approved, #reviewHistory = list_append(if_not_exists(#reviewHistory, :empty), :entry) REMOVE #pendingStatus, #expiresAtEpoch',
+      ConditionExpression: '(#status = :review OR #status = :reviewExpired) AND #proofKey = :proofKey',
+      ExpressionAttributeNames: { '#status': 'status', '#confirmedAt': 'paymentConfirmedAt', '#method': 'paymentConfirmationMethod', '#confirmedBy': 'paymentConfirmedBy', '#reviewedAt': 'paymentProofReviewedAt', '#proofPending': 'paymentProofPending', '#reviewStatus': 'paymentProofReviewStatus', '#reviewHistory': 'paymentProofReviewHistory', '#pendingStatus': 'pendingStatus', '#expiresAtEpoch': 'expiresAtEpoch', '#proofKey': 'paymentProofKey' },
+      ExpressionAttributeValues: { ':confirmed': 'CONFIRMED', ':confirmedAt': confirmedAt, ':method': 'MANUAL_PROOF', ':owner': owner.sub, ':false': false, ':review': 'UNDER_REVIEW', ':reviewExpired': 'UNDER_REVIEW_EXPIRED', ':proofKey': order.paymentProofKey, ':approved': 'APPROVED', ':empty': [], ':entry': [{ status: 'APPROVED', occurredAt: confirmedAt, note: 'Pagamento confirmado pelo organizador após validação do comprovante.', proofKey: order.paymentProofKey }] },
+    },
+  };
+  try {
+    await dynamo.send(new TransactWriteCommand({ TransactItems: [ ...numberUpdates, raffleUpdate, orderUpdate, auditPut(owner, {
+      action: 'PAYMENT_CONFIRMED_FROM_PROOF', raffleId: raffle.raffleId, raffleTitle: raffle.title || '', occurredAt: confirmedAt,
+      details: { transactionId: order.transactionId, numbers: order.numbers, amountInCents: Number(order.amountInCents || 0), paymentConfirmationMethod: 'MANUAL_PROOF' },
+    }) ] }));
+    return json(200, { item: { transactionId: order.transactionId, raffleId: raffle.raffleId, status: 'CONFIRMED', paymentConfirmedAt: confirmedAt, paymentConfirmationMethod: 'MANUAL_PROOF' } });
+  } catch (error) {
+    if (error?.name !== 'TransactionCanceledException' && error?.name !== 'TransactionConflictException') throw error;
+    const latestStates = await readOrderNumberStates(raffle.raffleId, order.numbers, order.transactionId);
+    if (latestStates.conflicts.length) {
+      await markProofResolutionRequired(order, raffle, owner, latestStates.conflicts);
+      return json(409, { code: 'NUMBER_CONFLICT', conflictNumbers: latestStates.conflicts, message: `Os números ${latestStates.conflicts.join(', ')} foram alterados durante a análise. A aprovação foi bloqueada; registre a resolução financeira.` });
+    }
+    return json(409, { message: 'A compra mudou durante a análise. Atualize a lista e tente novamente.' });
+  }
 }
 
 async function confirmRaffleTransactionPayment(event, owner) {
@@ -1612,6 +1974,9 @@ async function confirmRaffleTransactionPayment(event, owner) {
       },
       alreadyConfirmed: true,
     });
+  }
+  if (order.status === 'UNDER_REVIEW' || order.status === 'UNDER_REVIEW_EXPIRED') {
+    return confirmSubmittedProof(order, raffle, owner);
   }
   if (order.status !== 'PENDING') {
     return json(409, { message: 'Somente uma participação pendente pode ter o pagamento confirmado.' });
@@ -1752,6 +2117,102 @@ async function confirmRaffleTransactionPayment(event, owner) {
   }
 }
 
+async function rejectPaymentProof(event, owner) {
+  const raffleId = raffleIdFrom(event);
+  const transactionId = event.pathParameters?.transactionId;
+  if (!raffleId || typeof transactionId !== 'string' || !/^[0-9a-f-]{36}$/i.test(transactionId)) return json(400, { message: 'O identificador da participação é inválido.' });
+  const raffle = await getOwnedRaffle(raffleId, owner.sub);
+  if (!raffle) return json(404, { message: 'Rifa não encontrada.' });
+  const result = await dynamo.send(new GetCommand({ TableName: transactionsTable, Key: { transactionId }, ConsistentRead: true }));
+  const order = result.Item;
+  if (!order || order.raffleId !== raffleId) return json(404, { message: 'Participação não encontrada nesta rifa.' });
+  if (!['UNDER_REVIEW', 'UNDER_REVIEW_EXPIRED'].includes(order.status) || order.paymentProofPending !== true) return json(409, { message: 'Esta participação não tem um comprovante pendente de análise.' });
+  const now = new Date().toISOString();
+  const expired = order.status === 'UNDER_REVIEW_EXPIRED' || Number(order.expiresAtEpoch || 0) <= Math.floor(Date.now() / 1000);
+  const nextStatus = expired ? 'EXPIRED' : 'PENDING';
+  const payload = readBody(event) || {};
+  const note = typeof payload.note === 'string' ? payload.note.trim().slice(0, 300) : '';
+  const updates = [
+    {
+      Update: {
+        TableName: transactionsTable,
+        Key: { transactionId },
+        UpdateExpression: `SET #status = :nextStatus, #proofPending = :false, #reviewedAt = :now, #reviewStatus = :rejected, #reviewHistory = list_append(if_not_exists(#reviewHistory, :empty), :entry)${expired ? ' REMOVE #pendingStatus' : ''}`,
+        ConditionExpression: '(#status = :review OR #status = :reviewExpired) AND #proofPending = :true',
+        ExpressionAttributeNames: { '#status': 'status', '#proofPending': 'paymentProofPending', '#reviewedAt': 'paymentProofReviewedAt', '#reviewStatus': 'paymentProofReviewStatus', '#reviewHistory': 'paymentProofReviewHistory', '#pendingStatus': 'pendingStatus' },
+        ExpressionAttributeValues: { ':nextStatus': nextStatus, ':false': false, ':true': true, ':now': now, ':rejected': 'REJECTED', ':empty': [], ':entry': [{ status: 'REJECTED', occurredAt: now, note, proofKey: order.paymentProofKey }], ':review': 'UNDER_REVIEW', ':reviewExpired': 'UNDER_REVIEW_EXPIRED' },
+      },
+    },
+  ];
+  if (expired && order.participantCountTracked === true && participantLimitsTable && typeof order.participantId === 'string') {
+    updates.push({ Update: {
+      TableName: participantLimitsTable,
+      Key: { raffleId, participantId: order.participantId },
+      UpdateExpression: 'SET #activeNumbers = #activeNumbers - :quantity',
+      ConditionExpression: '#activeNumbers >= :quantity',
+      ExpressionAttributeNames: { '#activeNumbers': 'activeNumbers' },
+      ExpressionAttributeValues: { ':quantity': order.numbers.length },
+    } });
+  }
+  updates.push(auditPut(owner, { action: 'PAYMENT_PROOF_REJECTED', raffleId, raffleTitle: raffle.title || '', occurredAt: now, details: { transactionId, numbers: order.numbers, note } }));
+  await dynamo.send(new TransactWriteCommand({ TransactItems: updates }));
+  return json(200, { item: { transactionId, raffleId, status: nextStatus, paymentProofReviewStatus: 'REJECTED' } });
+}
+
+async function updatePaymentResolution(event, owner) {
+  const raffleId = raffleIdFrom(event);
+  const transactionId = event.pathParameters?.transactionId;
+  if (!raffleId || typeof transactionId !== 'string' || !/^[0-9a-f-]{36}$/i.test(transactionId)) return json(400, { message: 'O identificador da participação é inválido.' });
+  const raffle = await getOwnedRaffle(raffleId, owner.sub);
+  if (!raffle) return json(404, { message: 'Rifa não encontrada.' });
+  const result = await dynamo.send(new GetCommand({ TableName: transactionsTable, Key: { transactionId }, ConsistentRead: true }));
+  const order = result.Item;
+  if (!order || order.raffleId !== raffleId) return json(404, { message: 'Participação não encontrada nesta rifa.' });
+  if (order.status !== 'RESOLUTION_REQUIRED') return json(409, { message: 'Esta compra não está aguardando resolução financeira.' });
+  const payload = readBody(event) || {};
+  const status = String(payload.refundStatus || '').toUpperCase();
+  if (!['PENDING', 'REFUNDED', 'NOT_REQUIRED'].includes(status)) return json(400, { message: 'Informe PENDING, REFUNDED ou NOT_REQUIRED para o status da resolução.' });
+  const note = typeof payload.note === 'string' ? payload.note.trim().slice(0, 300) : '';
+  const now = new Date().toISOString();
+  const closing = status === 'REFUNDED' || status === 'NOT_REQUIRED';
+  if (closing && order.refundResolutionClosedAt) {
+    return order.refundResolutionStatus === status
+      ? json(200, { item: { transactionId, raffleId, status: 'RESOLUTION_REQUIRED', refundResolutionStatus: status, refundResolutionNote: order.refundResolutionNote || '' }, alreadyResolved: true })
+      : json(409, { message: 'Esta resolução financeira já foi encerrada e não pode ser alterada.' });
+  }
+  const transactItems = [{ Update: {
+    TableName: transactionsTable,
+    Key: { transactionId },
+    UpdateExpression: `SET #refundStatus = :status, #refundNote = :note, #refundUpdatedAt = :now${closing ? ', #refundClosedAt = if_not_exists(#refundClosedAt, :now)' : ''}`,
+    ConditionExpression: closing ? '#status = :resolution AND attribute_not_exists(#refundClosedAt)' : '#status = :resolution',
+    ExpressionAttributeNames: { '#status': 'status', '#refundStatus': 'refundResolutionStatus', '#refundNote': 'refundResolutionNote', '#refundUpdatedAt': 'refundResolutionUpdatedAt', '#refundClosedAt': 'refundResolutionClosedAt' },
+    ExpressionAttributeValues: { ':resolution': 'RESOLUTION_REQUIRED', ':status': status, ':note': note, ':now': now },
+  } }];
+  if (closing && order.paymentProofReservationExpired === true && order.participantCountTracked === true && participantLimitsTable && typeof order.participantId === 'string' && !order.refundResolutionClosedAt) {
+    transactItems.push({ Update: {
+      TableName: participantLimitsTable,
+      Key: { raffleId, participantId: order.participantId },
+      UpdateExpression: 'SET #activeNumbers = #activeNumbers - :quantity',
+      ConditionExpression: '#activeNumbers >= :quantity',
+      ExpressionAttributeNames: { '#activeNumbers': 'activeNumbers' },
+      ExpressionAttributeValues: { ':quantity': order.numbers.length },
+    } });
+  }
+  transactItems.push(auditPut(owner, { action: 'PAYMENT_RESOLUTION_UPDATED', raffleId, raffleTitle: raffle.title || '', occurredAt: now, details: { transactionId, refundStatus: status, note } }));
+  try {
+    await dynamo.send(new TransactWriteCommand({ TransactItems: transactItems }));
+  } catch (error) {
+    if (closing && ['TransactionCanceledException', 'TransactionConflictException'].includes(error?.name)) {
+      const latest = await dynamo.send(new GetCommand({ TableName: transactionsTable, Key: { transactionId }, ConsistentRead: true }));
+      if (latest.Item?.refundResolutionClosedAt && latest.Item.refundResolutionStatus === status) {
+        return json(200, { item: { transactionId, raffleId, status: 'RESOLUTION_REQUIRED', refundResolutionStatus: status, refundResolutionNote: latest.Item.refundResolutionNote || '' }, alreadyResolved: true });
+      }
+    }
+    throw error;
+  }
+  return json(200, { item: { transactionId, raffleId, status: 'RESOLUTION_REQUIRED', refundResolutionStatus: status, refundResolutionNote: note } });
+}
+
 export const handler = async (event) => {
   if (!tableName) {
     console.error('Missing RAFFLES_TABLE environment variable.');
@@ -1769,10 +2230,15 @@ export const handler = async (event) => {
     }
     if (routeKey === 'PUT /api/v1/organizer/settings/raffles') return await saveOrganizerRaffleSettings(event, owner);
     if (routeKey === 'POST /api/v1/organizer/raffle-images/upload-url') return await createRaffleImageUpload(event, owner);
+    if (routeKey === 'POST /api/v1/organizer/profile-image/upload-url') return await createPublicProfileImageUpload(event);
+    if (routeKey === 'GET /api/v1/organizer/public-profile') return await getOrganizerPublicProfile(owner);
+    if (routeKey === 'PUT /api/v1/organizer/public-profile') return await saveOrganizerPublicProfile(event, owner);
     if (routeKey === 'PUT /api/v1/organizer/home-featured-raffle') return await setHomeFeaturedRaffle(event, owner);
     if (routeKey === 'GET /api/v1/organizer/audit') return await listAuditEvents(event, owner);
     if (routeKey === 'GET /api/v1/organizer/support-tickets') return await listSupportTickets(event, owner.sub);
     if (routeKey === 'POST /api/v1/organizer/support-tickets') return await createSupportTicket(event, owner);
+    if (routeKey === 'GET /api/v1/organizer/marketing/contacts') return await marketingContacts(owner.sub);
+    if (routeKey === 'POST /api/v1/organizer/marketing/contacts') return await assignMarketingContacts(event, owner);
     if (routeKey === 'GET /api/v1/organizer/raffles') return await list(event, owner.sub);
     if (routeKey === 'POST /api/v1/organizer/raffles') return await create(event, owner);
     if (routeKey === 'GET /api/v1/organizer/raffles/{raffleId}') {
@@ -1787,6 +2253,8 @@ export const handler = async (event) => {
     if (routeKey === 'POST /api/v1/organizer/raffles/{raffleId}/transactions/{transactionId}/confirm') {
       return await confirmRaffleTransactionPayment(event, owner);
     }
+    if (routeKey === 'POST /api/v1/organizer/raffles/{raffleId}/transactions/{transactionId}/proof/reject') return await rejectPaymentProof(event, owner);
+    if (routeKey === 'POST /api/v1/organizer/raffles/{raffleId}/transactions/{transactionId}/resolution') return await updatePaymentResolution(event, owner);
     if (routeKey === 'POST /api/v1/organizer/raffles/{raffleId}/draw') {
       return await drawRaffle(event, owner);
     }
