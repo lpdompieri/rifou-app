@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { QRCodeSVG } from 'qrcode.react';
+import { jsPDF } from 'jspdf';
 import { createPixOrder } from './services/pixOrdersApi.js';
 import OrganizerRoutes from './OrganizerApp.jsx';
 
@@ -490,7 +491,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
       || autoDownloadedPurchaseCode.current === pixOrder.purchaseCode) return undefined;
     autoDownloadedPurchaseCode.current = pixOrder.purchaseCode;
     window.setTimeout(() => {
-      savePaymentImage(pixOrder, raffle).catch(() => showNotice('O navegador não permitiu o download automático. Use “Salvar QR e dados da compra”.'));
+      savePurchaseReceiptPdf(pixOrder, raffle).catch(() => showNotice('O navegador não permitiu o download automático. Use “Baixar comprovante em PDF”.'));
     }, 0);
     return undefined;
   }, [checkoutStep, pixOrder, raffle, remainingSeconds]);
@@ -746,7 +747,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
                   {copyMessage.startsWith('Código demonstrativo copiado') ? 'Código copiado' : 'Copiar código demonstrativo'}
                 </button>
                 {copyMessage && <p className="pix-copy-field__message" role="status">{copyMessage}</p>}
-                <button className="dashboard-period payment-save-button" type="button" onClick={() => savePaymentImage(pixOrder, raffle).catch(() => showNotice('Não foi possível gerar a imagem da compra neste navegador.'))}>Salvar QR e dados da compra</button>
+                <button className="dashboard-period payment-save-button" type="button" onClick={() => savePurchaseReceiptPdf(pixOrder, raffle).catch(() => showNotice('Não foi possível gerar o comprovante em PDF neste navegador.'))}>Baixar comprovante em PDF</button>
               </div>
               <div className="pix-demo-warning">
                 <strong>Simulação — não é uma cobrança válida.</strong>
@@ -957,16 +958,12 @@ function PublicPurchasePage() {
   const [notice, setNotice] = useState('');
   const [uploading, setUploading] = useState(false);
 
-  useEffect(() => {
-    const queryCode = new URLSearchParams(window.location.search).get('codigo') || '';
-    if (queryCode) setCode(queryCode.toUpperCase());
-  }, []);
-
-  const lookup = async (event) => {
-    event?.preventDefault();
-    const normalizedCode = code.trim().toUpperCase().replace(/\s+/g, '');
+  const lookupCode = useCallback(async (requestedCode) => {
+    const normalizedCode = requestedCode.trim().toUpperCase().replace(/\s+/g, '');
     setError(''); setNotice(''); setPurchase(null);
-    if (!/^RF-[A-F0-9]{32}$/.test(normalizedCode)) { setError('Confira o código. Ele começa com RF- e contém 32 caracteres.'); return; }
+    const isLegacyCode = /^RF-[A-F0-9]{32}$/.test(normalizedCode);
+    const isShortCode = /^RF-[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){3}$/.test(normalizedCode);
+    if (!isLegacyCode && !isShortCode) { setError('Confira o código no formato RF-XXXX-XXXX-XXXX-XXXX.'); return; }
     setLoading(true);
     try {
       const response = await fetch(`/api/purchases/${encodeURIComponent(normalizedCode)}`, { cache: 'no-store' });
@@ -975,6 +972,20 @@ function PublicPurchasePage() {
       setPurchase(payload.item);
     } catch (lookupError) { setError(lookupError.message || 'Não foi possível consultar a compra.'); }
     finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    const queryCode = new URLSearchParams(window.location.search).get('codigo') || '';
+    if (queryCode) {
+      const normalizedQueryCode = queryCode.trim().toUpperCase().replace(/\s+/g, '');
+      setCode(normalizedQueryCode);
+      void lookupCode(normalizedQueryCode);
+    }
+  }, [lookupCode]);
+
+  const lookup = async (event) => {
+    event?.preventDefault();
+    await lookupCode(code);
   };
 
   const submitProof = async (event) => {
@@ -1004,7 +1015,7 @@ function PublicPurchasePage() {
     finally { setUploading(false); }
   };
 
-  return <main className="public-purchase-page"><div className="container public-purchase-page__container"><nav className="breadcrumbs" aria-label="Navegação estrutural"><a href="/">Início</a><Icon name="arrow" size={14} /><span>Consultar compra</span></nav><header><p className="section-kicker">Acompanhamento público</p><h1>Consultar compra</h1><p>Informe o código recebido ao iniciar sua reserva. Não é necessário entrar ou criar uma conta.</p></header><form className="public-purchase-search" onSubmit={lookup}><label htmlFor="purchase-code">Código da compra</label><div><input id="purchase-code" value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} autoComplete="off" placeholder="RF-00000000000000000000000000000000" maxLength={35} required /><button className="button" type="submit" disabled={loading}>{loading ? 'Consultando…' : 'Consultar'}</button></div><small>O código é único e não revela seus dados de contato.</small></form>{error && <p className="checkout-error" role="alert">{error}</p>}{notice && <p className="dashboard-notice" role="status">{notice}</p>}{purchase && <section className="public-purchase-result" aria-live="polite"><div className="public-purchase-result__heading"><div><p className="section-kicker">{purchase.purchaseCode}</p><h2>{purchase.raffleTitle}</h2><p>Organizada por {purchase.organizer}</p></div><span className={`public-purchase-status public-purchase-status--${purchase.status.toLowerCase()}`}>{purchaseStatusLabel[purchase.status] || purchaseStatusLabel.PENDING}</span></div><dl><div><dt>Números selecionados</dt><dd>{purchase.numbers.map((number) => String(number).padStart(2, '0')).join(', ')}</dd></div><div><dt>Valor total</dt><dd>{formatCurrency(purchase.amountInCents / 100)}</dd></div><div><dt>Data da compra</dt><dd>{purchase.createdAt ? new Date(purchase.createdAt).toLocaleString('pt-BR', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}</dd></div><div><dt>Status da rifa</dt><dd>{purchase.raffleStatus === 'ACTIVE' ? 'Ativa' : purchase.raffleStatus === 'DRAWN' ? 'Sorteada' : purchase.raffleStatus}</dd></div>{purchase.paymentConfirmedAt && <div><dt>Pagamento confirmado</dt><dd>{new Date(purchase.paymentConfirmedAt).toLocaleString('pt-BR', { dateStyle: 'medium', timeStyle: 'short' })}</dd></div>}</dl>{purchase.proofReviewStatus === 'REJECTED' && purchase.status === 'PENDING' && <p className="proof-review-card__conflict">O organizador rejeitou o último comprovante{purchase.proofReviewNote ? `: ${purchase.proofReviewNote}` : '.'} {purchase.canSubmitProof ? 'Você pode enviar outra imagem enquanto a reserva estiver válida.' : ''}</p>}{purchase.status === 'RESOLUTION_REQUIRED' && <p className="proof-review-card__conflict">Números comprometidos: {purchase.conflictNumbers.map((number) => String(number).padStart(2, '0')).join(', ') || 'consulte o organizador'}. A aprovação foi bloqueada. Resolução financeira: {purchase.refundResolutionStatus === 'REFUNDED' ? 'reembolso registrado pelo organizador' : purchase.refundResolutionStatus === 'NOT_REQUIRED' ? 'marcada como não necessária' : 'pendente'}.</p>}{purchase.result && <div className={`public-purchase-result__winner${purchase.result.participantWon ? ' public-purchase-result__winner--won' : ''}`}><strong>{purchase.result.participantWon ? 'Você foi o ganhador!' : 'Resultado do sorteio'}</strong><span>Número {String(purchase.result.number).padStart(2, '0')} · {purchase.result.winnerName}</span><small>{purchase.result.drawnAt ? formatDrawDateTime(purchase.result.drawnAt) : ''}</small></div>}{purchase.isDemo && <p className="platform-payment-note"><Icon name="shield" size={18} /><span>Este pedido foi criado em modo demonstrativo. O QR Pix não aceita pagamentos.</span></p>}{purchase.canSubmitProof && <form className="public-proof-form" onSubmit={submitProof}><label htmlFor="purchase-proof">Enviar imagem do comprovante</label><input id="purchase-proof" name="proof" type="file" accept="image/jpeg,image/png,image/webp,image/avif" required /><small>O envio não confirma o pagamento. O organizador analisará o arquivo e validará novamente a disponibilidade dos números.</small><button className="button" type="submit" disabled={uploading}>{uploading ? 'Enviando…' : 'Enviar para análise'}</button></form>}<a className="text-link" href={`/rifas/${encodeURIComponent(purchase.raffleId)}`}>Ver página da rifa <Icon name="arrow" size={16} /></a></section>}</div></main>;
+  return <main className="public-purchase-page"><div className="container public-purchase-page__container"><nav className="breadcrumbs" aria-label="Navegação estrutural"><a href="/">Início</a><Icon name="arrow" size={14} /><span>Consultar compra</span></nav><header><p className="section-kicker">Acompanhamento público</p><h1>Consultar compra</h1><p>Informe o código recebido ao iniciar sua reserva. Não é necessário entrar ou criar uma conta.</p></header><form className="public-purchase-search" onSubmit={lookup}><label htmlFor="purchase-code">Código da compra</label><div><input id="purchase-code" value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} autoComplete="off" placeholder="RF-XXXX-XXXX-XXXX-XXXX" maxLength={35} required /><button className="button" type="submit" disabled={loading}>{loading ? 'Consultando…' : 'Consultar'}</button></div><small>O código é único e não revela seus dados de contato.</small></form>{error && <p className="checkout-error" role="alert">{error}</p>}{notice && <p className="dashboard-notice" role="status">{notice}</p>}{purchase && <section className="public-purchase-result" aria-live="polite"><div className="public-purchase-result__heading"><div><p className="section-kicker">{purchase.purchaseCode}</p><h2>{purchase.raffleTitle}</h2><p>Organizada por {purchase.organizer}</p></div><span className={`public-purchase-status public-purchase-status--${purchase.status.toLowerCase()}`}>{purchaseStatusLabel[purchase.status] || purchaseStatusLabel.PENDING}</span></div><dl><div><dt>Números selecionados</dt><dd>{purchase.numbers.map((number) => String(number).padStart(2, '0')).join(', ')}</dd></div><div><dt>Valor total</dt><dd>{formatCurrency(purchase.amountInCents / 100)}</dd></div><div><dt>Data da compra</dt><dd>{purchase.createdAt ? new Date(purchase.createdAt).toLocaleString('pt-BR', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}</dd></div><div><dt>Status da rifa</dt><dd>{purchase.raffleStatus === 'ACTIVE' ? 'Ativa' : purchase.raffleStatus === 'DRAWN' ? 'Sorteada' : purchase.raffleStatus}</dd></div>{purchase.paymentConfirmedAt && <div><dt>Pagamento confirmado</dt><dd>{new Date(purchase.paymentConfirmedAt).toLocaleString('pt-BR', { dateStyle: 'medium', timeStyle: 'short' })}</dd></div>}</dl>{purchase.proofReviewStatus === 'REJECTED' && purchase.status === 'PENDING' && <p className="proof-review-card__conflict">O organizador rejeitou o último comprovante{purchase.proofReviewNote ? `: ${purchase.proofReviewNote}` : '.'} {purchase.canSubmitProof ? 'Você pode enviar outra imagem enquanto a reserva estiver válida.' : ''}</p>}{purchase.status === 'RESOLUTION_REQUIRED' && <p className="proof-review-card__conflict">Números comprometidos: {purchase.conflictNumbers.map((number) => String(number).padStart(2, '0')).join(', ') || 'consulte o organizador'}. A aprovação foi bloqueada. Resolução financeira: {purchase.refundResolutionStatus === 'REFUNDED' ? 'reembolso registrado pelo organizador' : purchase.refundResolutionStatus === 'NOT_REQUIRED' ? 'marcada como não necessária' : 'pendente'}.</p>}{purchase.result && <div className={`public-purchase-result__winner${purchase.result.participantWon ? ' public-purchase-result__winner--won' : ''}`}><strong>{purchase.result.participantWon ? 'Você foi o ganhador!' : 'Resultado do sorteio'}</strong><span>Número {String(purchase.result.number).padStart(2, '0')} · {purchase.result.winnerName}</span><small>{purchase.result.drawnAt ? formatDrawDateTime(purchase.result.drawnAt) : ''}</small></div>}{purchase.isDemo && <p className="platform-payment-note"><Icon name="shield" size={18} /><span>Este pedido foi criado em modo demonstrativo. O QR Pix não aceita pagamentos.</span></p>}{purchase.canSubmitProof && <form className="public-proof-form" onSubmit={submitProof}><label htmlFor="purchase-proof">Enviar imagem do comprovante</label><input id="purchase-proof" name="proof" type="file" accept="image/jpeg,image/png,image/webp,image/avif" required /><small>O envio não confirma o pagamento. O organizador analisará o arquivo e validará novamente a disponibilidade dos números.</small><button className="button" type="submit" disabled={uploading}>{uploading ? 'Enviando…' : 'Enviar para análise'}</button></form>}<a className="text-link" href={`/rifas/${encodeURIComponent(purchase.raffleId)}`}>Ver página da rifa <Icon name="arrow" size={16} /></a></section>}</div></main>;
 }
 
 function PublicOrganizerPage({ publicId }) {
@@ -1034,31 +1045,62 @@ function PublicOrganizerPage({ publicId }) {
   return <main className="public-profile-page"><div className="container"><section className="public-profile-heading"><div className="public-profile-heading__logo">{profile.logoUrl ? <img src={profile.logoUrl} alt={`Logotipo de ${profile.publicName}`} /> : <span>{profile.publicName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase()}</span>}</div><div><p className="section-kicker">Perfil público do organizador</p><h1>{profile.publicName}</h1><p>{profile.message || 'Confira as rifas ativas e os resultados deste organizador.'}</p></div><a className="public-profile-heading__consult" href="/consultar-compra">Consultar compra</a></section>{featured.length > 0 && <section className="section public-profile-raffles"><div className="section-heading"><p className="section-kicker">Selecionadas pelo organizador</p><h2>Rifas em destaque</h2></div><div className="raffle-grid">{featured.map((raffle) => <RaffleCard key={raffle.id} raffle={raffle} />)}</div></section>}<section className="section public-profile-raffles"><div className="section-heading"><p className="section-kicker">Campanhas públicas</p><h2>{featured.length ? 'Todas as rifas' : 'Rifas e resultados'}</h2></div>{other.length ? <div className="raffle-grid">{other.map((raffle) => <RaffleCard key={raffle.id} raffle={raffle} />)}</div> : !featured.length ? <p className="raffles-empty">Este organizador ainda não tem rifas públicas disponíveis.</p> : null}</section><DrawnRafflesSection raffles={featured.filter((raffle) => raffle.status === 'DRAWN').concat(otherDrawn)} /></div></main>;
 }
 
-async function savePaymentImage(order, raffle) {
-  const svg = document.querySelector('.pix-card__qr svg');
-  if (!svg) return;
-  const markup = new XMLSerializer().serializeToString(svg);
-  const source = new Image();
-  const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
-  const objectUrl = URL.createObjectURL(blob);
-  try {
-    await new Promise((resolve, reject) => { source.onload = resolve; source.onerror = reject; source.src = objectUrl; });
-    const canvas = document.createElement('canvas'); canvas.width = 1000; canvas.height = 1320;
-    const context = canvas.getContext('2d');
-    context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
-    context.fillStyle = '#163d2c'; context.font = 'bold 42px Arial'; context.fillText('RIFOU · RESERVA DEMONSTRATIVA', 58, 90);
-    context.fillStyle = '#17251d'; context.font = 'bold 34px Arial'; context.fillText(raffle.title.slice(0, 38), 58, 160);
-    context.drawImage(source, 205, 205, 590, 590);
-    context.fillStyle = '#17251d'; context.font = 'bold 30px Arial'; context.fillText(`Compra: ${order.purchaseCode}`, 58, 860);
-    context.font = '26px Arial'; context.fillText(`Números: ${order.numbers.join(', ')}`, 58, 920);
-    context.fillText(`Total: ${formatCurrency(order.amountInCents / 100)}`, 58, 980);
-    context.fillStyle = '#a34129'; context.font = 'bold 24px Arial'; context.fillText('Este QR não recebe pagamentos.', 58, 1090);
-    const image = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-    if (!image) throw new Error('Não foi possível gerar a imagem.');
-    const downloadUrl = URL.createObjectURL(image); const link = document.createElement('a');
-    link.href = downloadUrl; link.download = `rifou-compra-${order.purchaseCode}.png`; link.click();
-    window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1500);
-  } finally { URL.revokeObjectURL(objectUrl); }
+async function savePurchaseReceiptPdf(order, raffle) {
+  const doc = new jsPDF();
+  const lookupUrl = `${window.location.origin}/consultar-compra?codigo=${encodeURIComponent(order.purchaseCode)}`;
+  const numbers = order.numbers.map((number) => String(number).padStart(2, '0')).join(', ');
+  const expiresAt = order.expiresAt ? new Date(order.expiresAt).toLocaleString('pt-BR', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
+  let y = 55;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(20);
+  doc.setTextColor(22, 61, 44);
+  doc.text('RIFOU', 20, 24);
+  doc.setFontSize(16);
+  doc.setTextColor(23, 37, 29);
+  doc.text('Comprovante da reserva', 20, 38);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(11);
+  doc.text('Rifa', 20, y);
+  y += 7;
+  doc.setFont('helvetica', 'bold');
+  const titleLines = doc.splitTextToSize(raffle.title, 170);
+  doc.text(titleLines, 20, y);
+  y += titleLines.length * 6 + 7;
+  doc.setFont('helvetica', 'normal');
+  doc.text('Código da compra', 20, y);
+  y += 8;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.text(order.purchaseCode, 20, y);
+  y += 12;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(11);
+  const numberLines = doc.splitTextToSize(`Números: ${numbers}`, 170);
+  doc.text(numberLines, 20, y);
+  y += numberLines.length * 6 + 3;
+  doc.text(`Valor total: ${formatCurrency(order.amountInCents / 100)}`, 20, y);
+  y += 8;
+  doc.text(`Reserva válida até: ${expiresAt}`, 20, y);
+  y += 15;
+  doc.setTextColor(163, 65, 41);
+  doc.setFont('helvetica', 'bold');
+  const noticeLines = doc.splitTextToSize('Reserva demonstrativa. Este documento não confirma pagamento.', 170);
+  doc.text(noticeLines, 20, y);
+  y += noticeLines.length * 6 + 10;
+  doc.setTextColor(23, 37, 29);
+  doc.setFont('helvetica', 'normal');
+  doc.text('Acesse este link para consultar a compra:', 20, y);
+  y += 10;
+  doc.setTextColor(33, 124, 88);
+  doc.textWithLink('Consultar compra no RIFOU', 20, y, { url: lookupUrl });
+  y += 10;
+  doc.setTextColor(23, 37, 29);
+  doc.setFontSize(8);
+  const urlLines = doc.splitTextToSize(lookupUrl, 170);
+  doc.text(urlLines, 20, y);
+  doc.link(20, y - 3, 170, urlLines.length * 4, { url: lookupUrl });
+  doc.save(`rifou-comprovante-${order.purchaseCode}.pdf`);
 }
 
 function RafflesLoadState({ error, onRetry }) {
