@@ -646,7 +646,31 @@ function OverviewSection({ raffles, summary = {}, displayName, goTo, onManage })
 }
 
 function RaffleTable({ raffles, compact = false, onManage = () => {} }) {
-  return <div className="dashboard-table-wrap"><table className="dashboard-table"><thead><tr><th>Rifa</th><th>Valor por número</th><th>Andamento</th><th>Status</th><th /></tr></thead><tbody>{raffles.map((raffle) => { const sold = Number(raffle.sold || 0); return <tr key={raffle.id}><td><span className="dashboard-raffle-cell"><img src={raffle.image || '/images/watch.avif'} alt="" /><span><strong>{raffle.title}</strong><small>{raffle.numbers} números</small></span></span></td><td>{formatMoney(Number(String(raffle.price || '0').replace(',', '.')))}</td><td><span className="dashboard-progress-label">{sold}%</span><span className="dashboard-inline-progress"><i style={{ width: `${sold}%` }} /></span></td><td><StatusPill status={raffle.status || 'Ativa'} /></td><td><button className="dashboard-row-action" type="button" aria-label={`Gerenciar ${raffle.title}`} onClick={() => onManage(raffle)}>Gerenciar <DashIcon name="arrow" size={14} /></button></td></tr>; })}</tbody></table>{!raffles.length && <p className="dashboard-empty">Nenhuma rifa cadastrada ainda.</p>}{compact && <p className="dashboard-table-note">Os dados são carregados da sua conta no RIFOU.</p>}</div>;
+  const [shareMessage, setShareMessage] = useState('');
+
+  const shareRaffle = async (raffle) => {
+    const path = `/rifas/${encodeURIComponent(raffle.id)}`;
+    const url = new URL(path, window.location.origin).toString();
+    try {
+      if (typeof navigator.share === 'function') {
+        await navigator.share({ title: raffle.title, text: `Confira esta rifa no RIFOU: ${raffle.title}`, url });
+        setShareMessage(`Link da rifa: ${url}`);
+      } else {
+        await navigator.clipboard.writeText(url);
+        setShareMessage(`Link da rifa copiado: ${url}`);
+      }
+    } catch (error) {
+      if (error?.name === 'AbortError') return;
+      try {
+        await navigator.clipboard.writeText(url);
+        setShareMessage(`Link da rifa copiado: ${url}`);
+      } catch {
+        setShareMessage(`Link público: ${url}`);
+      }
+    }
+  };
+
+  return <div className="dashboard-table-wrap"><table className="dashboard-table"><thead><tr><th>Rifa</th><th>Valor por número</th><th>Andamento</th><th>Status</th><th>Link e ações</th></tr></thead><tbody>{raffles.map((raffle) => { const sold = Number(raffle.sold || 0); const publicPath = `/rifas/${encodeURIComponent(raffle.id)}`; return <tr key={raffle.id}><td><span className="dashboard-raffle-cell"><img src={raffle.image || '/images/watch.avif'} alt="" /><span><strong>{raffle.title}</strong><small>{raffle.numbers} números</small></span></span></td><td>{formatMoney(Number(String(raffle.price || '0').replace(',', '.')))}</td><td><span className="dashboard-progress-label">{sold}%</span><span className="dashboard-inline-progress"><i style={{ width: `${sold}%` }} /></span></td><td><StatusPill status={raffle.status || 'Ativa'} /></td><td><a className="dashboard-row-action" href={publicPath} target="_blank" rel="noreferrer">Ver rifa</a><button className="dashboard-row-action" type="button" onClick={() => shareRaffle(raffle)}>Compartilhar</button><button className="dashboard-row-action" type="button" aria-label={`Gerenciar ${raffle.title}`} onClick={() => onManage(raffle)}>Gerenciar <DashIcon name="arrow" size={14} /></button></td></tr>; })}</tbody></table>{!raffles.length && <p className="dashboard-empty">Nenhuma rifa cadastrada ainda.</p>}{shareMessage && <p className="dashboard-table-note" role="status">{shareMessage}</p>}{compact && <p className="dashboard-table-note">Os dados são carregados da sua conta no RIFOU.</p>}</div>;
 }
 
 function RafflesSection({ raffles, goTo, onManage }) {

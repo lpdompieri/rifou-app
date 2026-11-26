@@ -53,7 +53,10 @@ async function findOrder(code) {
 
 function normalizeCode(value) {
   const code = String(value || '').trim().toUpperCase().replace(/\s+/g, '');
-  return /^RF-[A-F0-9]{32}$/.test(code) ? code : '';
+  return /^RF-[A-F0-9]{32}$/.test(code)
+    || /^RF-[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){3}$/.test(code)
+    ? code
+    : '';
 }
 
 async function getPublicPurchase(event, code) {

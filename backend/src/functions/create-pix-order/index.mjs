@@ -13,7 +13,27 @@ const secretsManager = new SecretsManagerClient({});
 const RESERVATION_DURATION_MS = 15 * 60 * 1000;
 // 97 picks + order + participant counter + raffle counter = 100 transaction actions.
 const MAX_NUMBERS_PER_ORDER = 97;
+const PURCHASE_CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 let participantLimitHashSecretPromise;
+
+function createPurchaseCode() {
+  const bytes = randomBytes(10);
+  let buffer = 0;
+  let bits = 0;
+  let encoded = '';
+
+  for (const byte of bytes) {
+    buffer = (buffer << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      encoded += PURCHASE_CODE_ALPHABET[(buffer >> bits) & 31];
+    }
+  }
+
+  const groups = encoded.match(/.{4}/g);
+  return `RF-${groups.join('-')}`;
+}
 
 async function getParticipantId(phone) {
   participantLimitHashSecretPromise ||= secretsManager.send(new GetSecretValueCommand({
@@ -164,7 +184,7 @@ export const handler = async (event) => {
     const expiresAt = Date.now() + RESERVATION_DURATION_MS;
     const expiresAtEpoch = Math.ceil(expiresAt / 1000);
     const transactionId = randomUUID();
-    const purchaseCode = `RF-${randomBytes(16).toString('hex').toUpperCase()}`;
+    const purchaseCode = createPurchaseCode();
     const purchaseCodeHash = await hashPurchaseCode(purchaseCode);
     const createdAt = new Date(createdAtEpoch * 1000).toISOString();
     const order = {
