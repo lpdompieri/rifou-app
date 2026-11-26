@@ -574,7 +574,7 @@ function OrganizerDashboard({ user, onUserUpdate }) {
         <div className="dashboard-sidebar__bottom"><div className="dashboard-help"><span><DashIcon name="eye" size={18} /></span><strong>Precisa de ajuda?</strong><small>Estamos aqui para apoiar você.</small><button type="button" onClick={() => goTo('support')}>Falar com suporte <DashIcon name="arrow" size={14} /></button></div><button className="dashboard-nav__item dashboard-nav__logout" type="button" onClick={logout}><DashIcon name="logout" size={18} /><span>Sair do painel</span></button></div>
       </aside>
       <main className="dashboard-main">
-        <header className="dashboard-topbar"><div className="dashboard-topbar__crumb"><span>Painel</span><span>/</span><strong>{section === 'raffle-detail' ? managedRaffle?.title : menuItems.find((item) => item.id === section)?.label || (section === 'create' ? (editingRaffle ? 'Editar rifa' : 'Nova rifa') : 'Painel')}</strong></div><div className="dashboard-topbar__actions"><span className="dashboard-demo-badge">{dashboardLoading ? 'Sincronizando...' : 'Dados da sua conta'}</span><button className="dashboard-icon-button" type="button" aria-label="Notificações" onClick={() => setNotice('Nenhuma notificação disponível.') }><DashIcon name="bell" size={18} /></button><button className="dashboard-topbar__profile" type="button" onClick={() => goTo('settings')}><span className="dashboard-avatar dashboard-avatar--small">{initials}</span><span>{displayName}</span></button></div></header>
+        <header className="dashboard-topbar"><div className="dashboard-topbar__crumb"><span>Painel</span><span>/</span><strong>{section === 'raffle-detail' ? managedRaffle?.title : menuItems.find((item) => item.id === section)?.label || (section === 'create' ? (editingRaffle ? 'Editar rifa' : 'Nova rifa') : 'Painel')}</strong></div><div className="dashboard-topbar__actions"><span className="dashboard-demo-badge">{dashboardLoading ? 'Sincronizando...' : 'Dados da sua conta'}</span><button className="dashboard-icon-button" type="button" aria-label="Notificações" onClick={() => setNotice('Nenhuma notificação disponível.') }><DashIcon name="bell" size={18} /></button><button className="dashboard-topbar__profile" type="button" onClick={() => goTo('settings')}><span className="dashboard-avatar dashboard-avatar--small">{initials}</span><span>{displayName}</span></button><button className="dashboard-topbar__logout" type="button" onClick={logout}><DashIcon name="logout" size={16} /><span>Sair</span></button></div></header>
         <div className="dashboard-content">
           {notice && <p className="dashboard-notice" role="status">{notice}<button type="button" aria-label="Fechar aviso" onClick={() => setNotice('')}>×</button></p>}
           {dashboardLoading && !summary && <p className="organizer-auth__notice" role="status">Carregando seu painel...</p>}
@@ -639,7 +639,7 @@ function OverviewSection({ raffles, summary = {}, displayName, goTo, onManage })
     <div className="dashboard-stats">{stats.map((stat) => <article className="dashboard-stat" key={stat.label}><span className={`dashboard-stat__icon dashboard-stat__icon--${stat.color}`}><DashIcon name={stat.icon} size={19} /></span><span className="dashboard-stat__label">{stat.label}</span><strong>{stat.value}</strong><small>{stat.change}</small></article>)}</div>
     <div className="dashboard-overview-grid">
       <section className="dashboard-card dashboard-chart-card"><div className="dashboard-card__heading"><div><h2>Desempenho das rifas</h2><p>{month ? 'Campanhas criadas no mês selecionado' : 'Números reservados e confirmados por campanha'}</p></div><button className="dashboard-text-button" type="button" onClick={() => goTo('raffles')}>Ver rifas</button></div>{visibleRaffles.length ? visibleRaffles.slice(0, 5).map((raffle) => <div className="dashboard-performance-row" key={raffle.id}><span><strong>{raffle.title}</strong><small>{raffle.reserved} reservados · {raffle.confirmed} confirmados de {raffle.numberCount}</small></span><span className="dashboard-inline-progress"><i style={{ width: `${raffle.sold}%` }} /></span></div>) : <p className="dashboard-empty">{month ? 'Nenhuma rifa foi criada neste mês.' : 'Você ainda não cadastrou rifas. Crie sua primeira campanha para acompanhar os resultados.'}</p>}<p className="dashboard-chart-card__caption"><span /> Os números reservados ainda não representam pagamentos confirmados.</p></section>
-      <section className="dashboard-card dashboard-activity-card"><div className="dashboard-card__heading"><div><h2>Resumo financeiro</h2><p>{month ? `Movimento de ${month}` : 'Baseado no estado atual das rifas'}</p></div></div><div className="dashboard-finance-summary"><span>Receita confirmada<strong>{formatMoney(Number(currentSummary.confirmedRevenueInCents || 0) / 100)}</strong></span><span>{month ? 'Pendente no mês' : 'Valor em reservas'}<strong>{formatMoney(Number((month ? currentSummary.pendingAmountInCents : currentSummary.reservedAmountInCents) || 0) / 100)}</strong></span></div><p className="dashboard-table-note">Os pedidos Pix desta etapa são demonstrativos. A receita só será confirmada após integração de pagamento.</p></section>
+      <section className="dashboard-card dashboard-activity-card"><div className="dashboard-card__heading"><div><h2>Resumo financeiro</h2><p>{month ? `Movimento de ${month}` : 'Baseado no estado atual das rifas'}</p></div></div><div className="dashboard-finance-summary"><span>Receita confirmada<strong>{formatMoney(Number(currentSummary.confirmedRevenueInCents || 0) / 100)}</strong></span><span>{month ? 'Pendente no mês' : 'Valor em reservas'}<strong>{formatMoney(Number((month ? currentSummary.pendingAmountInCents : currentSummary.reservedAmountInCents) || 0) / 100)}</strong></span></div><p className="dashboard-table-note">A confirmação do Pix é manual. Reservas não confirmadas são liberadas após 15 minutos.</p></section>
     </div>
     <section className="dashboard-card dashboard-raffles-card"><div className="dashboard-card__heading"><div><h2>Suas rifas</h2><p>{month ? visibleRaffles.length : summary.raffleCount || 0} campanhas {month ? 'criadas no mês' : 'cadastradas'}</p></div><button className="dashboard-text-button" type="button" onClick={() => goTo('raffles')}>Ver todas <DashIcon name="arrow" size={15} /></button></div><RaffleTable raffles={visibleRaffles.slice(0, 3)} onManage={onManage} /></section>
   </>;
@@ -1427,7 +1427,7 @@ function FinanceSection({ raffles = [] }) {
         <div className="dashboard-table-wrap dashboard-finance-table-wrap"><table className="dashboard-table dashboard-finance-table"><thead><tr><th>Rifa</th><th>Por número</th><th>Reservados</th><th>Pendente</th><th>Confirmados</th><th>Recebido</th><th>Disponíveis</th></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td><span className="dashboard-finance-raffle"><strong>{item.title}</strong><StatusPill status={item.status} /></span></td><td>{formatMoney(Number(item.unitPriceInCents || 0) / 100)}</td><td>{Number(item.reservedNumbers || 0)}</td><td className="dashboard-finance-pending">{formatMoney(Number(item.pendingAmountInCents || 0) / 100)}</td><td>{Number(item.confirmedNumbers || 0)}</td><td className="dashboard-finance-confirmed">{formatMoney(Number(item.confirmedRevenueInCents || 0) / 100)}</td><td>{Number(item.availableNumbers || 0)}</td></tr>)}</tbody></table>{!items.length && <p className="dashboard-empty">Você ainda não tem rifas cadastradas.</p>}</div>
         <div className="dashboard-finance-mobile-list">{items.map((item) => <article className="dashboard-finance-mobile-item" key={item.id}><header><div><strong>{item.title}</strong><small>{Number(item.numberCount || 0)} números · {formatMoney(Number(item.unitPriceInCents || 0) / 100)} por número</small></div><StatusPill status={item.status} /></header><dl><div><dt>Reservados</dt><dd>{Number(item.reservedNumbers || 0)}</dd></div><div><dt>Pendente</dt><dd className="dashboard-finance-pending">{formatMoney(Number(item.pendingAmountInCents || 0) / 100)}</dd></div><div><dt>Confirmados</dt><dd>{Number(item.confirmedNumbers || 0)}</dd></div><div><dt>Recebido</dt><dd className="dashboard-finance-confirmed">{formatMoney(Number(item.confirmedRevenueInCents || 0) / 100)}</dd></div><div><dt>Disponíveis</dt><dd>{Number(item.availableNumbers || 0)}</dd></div></dl></article>)}{!items.length && <p className="dashboard-empty">Você ainda não tem rifas cadastradas.</p>}</div>
       </section>
-      <section className="dashboard-card dashboard-finance-note"><span><DashIcon name="clock" size={21} /></span><div><h2>Reservas atualizadas automaticamente</h2><p>Os pedidos Pix demonstrativos aparecem como pendentes e mantêm os números bloqueados por até 15 minutos. A tela atualiza a cada 10 segundos. Enquanto o gateway não está integrado, o organizador pode confirmar manualmente o recebimento de uma reserva ainda válida.</p></div></section>
+      <section className="dashboard-card dashboard-finance-note"><span><DashIcon name="clock" size={21} /></span><div><h2>Reservas atualizadas automaticamente</h2><p>Os pagamentos Pix ficam pendentes até a confirmação manual do organizador. Os números permanecem reservados por até 15 minutos; depois disso, a reserva expira e os números podem voltar a ficar disponíveis.</p></div></section>
     </> : null}
   </>;
 }
@@ -1630,8 +1630,11 @@ function SettingsSection({ user, setNotice, onProfileUpdated }) {
   const [verificationCode, setVerificationCode] = useState('');
   const [phoneVerificationRequired, setPhoneVerificationRequired] = useState(false);
   const [completionDelayDays, setCompletionDelayDays] = useState(30);
+  const [pixKey, setPixKey] = useState('');
+  const [pixCity, setPixCity] = useState('');
   const [loadingRaffleSettings, setLoadingRaffleSettings] = useState(true);
   const [savingRaffleSettings, setSavingRaffleSettings] = useState(false);
+  const [savingPixSettings, setSavingPixSettings] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1646,7 +1649,11 @@ function SettingsSection({ user, setNotice, onProfileUpdated }) {
     let cancelled = false;
     organizerApi('/api/organizador/settings/raffles')
       .then((result) => {
-        if (!cancelled) setCompletionDelayDays(Number(result.settings?.completionDelayDays || 30));
+        if (!cancelled) {
+          setCompletionDelayDays(Number(result.settings?.completionDelayDays || 30));
+          setPixKey(result.settings?.pixKey || '');
+          setPixCity(result.settings?.pixCity || '');
+        }
       })
       .catch((error) => { if (!cancelled) setNotice(error.message || 'Não foi possível carregar as configurações das rifas.'); })
       .finally(() => { if (!cancelled) setLoadingRaffleSettings(false); });
@@ -1707,14 +1714,52 @@ function SettingsSection({ user, setNotice, onProfileUpdated }) {
     try {
       const result = await organizerApi('/api/organizador/settings/raffles', {
         method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ completionDelayDays: days }),
+        body: JSON.stringify({ completionDelayDays: days, pixKey, pixCity }),
       });
       setCompletionDelayDays(Number(result.settings?.completionDelayDays || days));
+      setPixKey(result.settings?.pixKey || '');
+      setPixCity(result.settings?.pixCity || '');
       setNotice('Configuração de conclusão das rifas atualizada.');
     } catch (error) {
       setNotice(error.message || 'Não foi possível salvar as configurações das rifas.');
     } finally {
       setSavingRaffleSettings(false);
+    }
+  };
+
+  const savePixSettings = async (event) => {
+    event.preventDefault();
+    const rawKey = pixKey.trim();
+    const compactKey = rawKey.replace(/[\s().-]/g, '');
+    const digitsKey = rawKey.replace(/\D/g, '');
+    const cnpjKey = rawKey.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+    const key = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawKey)
+      || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(rawKey)
+      ? rawKey
+      : /^\+?55\d{10,11}$/.test(compactKey)
+        ? `+${compactKey.replace(/^\+/, '')}`
+        : /^\d{11}$|^\d{14}$/.test(digitsKey)
+          ? digitsKey
+          : /^[A-Z0-9]{14}$/.test(cnpjKey) && /[A-Z]/.test(cnpjKey) ? cnpjKey : '';
+    const city = pixCity.trim().replace(/\s+/g, ' ');
+    if ((rawKey && !key) || (Boolean(key) !== Boolean(city)) || city.length > 15) {
+      setNotice('Informe uma chave Pix válida e a cidade do recebedor com até 15 caracteres. Para remover a chave, deixe os dois campos vazios.');
+      return;
+    }
+    setSavingPixSettings(true);
+    setNotice('');
+    try {
+      const result = await organizerApi('/api/organizador/settings/raffles', {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ completionDelayDays: Number(completionDelayDays), pixKey: key, pixCity: city }),
+      });
+      setPixKey(result.settings?.pixKey || '');
+      setPixCity(result.settings?.pixCity || '');
+      setNotice(key ? 'Chave Pix e cidade do recebedor salvas.' : 'Chave Pix removida.');
+    } catch (error) {
+      setNotice(error.message || 'Não foi possível salvar a chave Pix.');
+    } finally {
+      setSavingPixSettings(false);
     }
   };
 
@@ -1735,6 +1780,13 @@ function SettingsSection({ user, setNotice, onProfileUpdated }) {
         <p>Depois do sorteio, a campanha continua visível no histórico público pelo prazo configurado. Ao final, passa para Concluída e fica privada, disponível apenas no painel do criador.</p>
         <label className="organizer-field"><span>Concluir após o sorteio (dias)</span><input type="number" min="1" max="365" value={completionDelayDays} onChange={(event) => setCompletionDelayDays(event.target.value)} required disabled={loadingRaffleSettings} /><small>Defina de 1 a 365 dias. Alterações futuras não mudam prazos já gravados. Rifas sorteadas antes desta rotina serão programadas na primeira execução.</small></label>
         <button className="button" type="submit" disabled={loadingRaffleSettings || savingRaffleSettings}>{savingRaffleSettings ? 'Salvando...' : 'Salvar configuração'}</button>
+      </form>
+      <form className="dashboard-card dashboard-settings-card" onSubmit={savePixSettings}>
+        <h2>Recebimento por Pix</h2>
+        <p>O valor será enviado diretamente para esta chave. O Rifou gera um QR Pix estático; a confirmação do pagamento continua manual pelo organizador.</p>
+        <label className="organizer-field"><span>Chave Pix</span><input value={pixKey} onChange={(event) => setPixKey(event.target.value)} maxLength={77} autoComplete="off" placeholder="E-mail, telefone +55, CPF/CNPJ ou chave aleatória" disabled={loadingRaffleSettings} /><small>Use uma chave cadastrada na instituição financeira que receberá os pagamentos.</small></label>
+        <label className="organizer-field"><span>Cidade do recebedor</span><input value={pixCity} onChange={(event) => setPixCity(event.target.value)} maxLength={15} autoComplete="address-level2" placeholder="Ex.: SAO PAULO" disabled={loadingRaffleSettings} /><small>Obrigatória junto com a chave Pix. Até 15 caracteres.</small></label>
+        <button className="button" type="submit" disabled={loadingRaffleSettings || savingPixSettings}>{savingPixSettings ? 'Salvando...' : pixKey ? 'Salvar dados Pix' : 'Salvar chave Pix'}</button>
       </form>
       <section className="dashboard-card dashboard-settings-card">
         <h2>Segurança da conta</h2><p>Login e recuperação de senha são protegidos pelo Cognito.</p>

@@ -16,7 +16,7 @@ export async function createPixOrder({ raffleId, name, phone, numbers }) {
   }
 
   if (!response.ok) {
-    const error = new Error(payload.message || 'Não foi possível gerar o Pix demonstrativo.');
+    const error = new Error(payload.message || 'Não foi possível gerar o Pix.');
     error.status = response.status;
     error.code = payload.code;
     error.maxNumbersPerUser = payload.maxNumbersPerUser;
@@ -38,6 +38,7 @@ export async function createPixOrder({ raffleId, name, phone, numbers }) {
     amountInCents: payload.item.amountInCents,
     expiresAt: payload.item.expiresAt,
     copyPasteCode: payload.item.copyPasteCode,
-    isDemo: true,
+    pixTxid: typeof payload.item.pixTxid === 'string' ? payload.item.pixTxid : '',
+    isDemo: Boolean(payload.item.isDemo),
   };
 }
