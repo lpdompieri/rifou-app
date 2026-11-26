@@ -610,6 +610,8 @@ function RaffleDetailsPage({ raffle, showNotice }) {
       if (error?.code === 'USER_LIMIT_REACHED') {
         setCheckoutStep('details');
         showNotice(error.message);
+      } else if (error?.code === 'PIX_NOT_CONFIGURED') {
+        setFormError(error.message || 'O organizador ainda não configurou uma chave Pix.');
       } else if (error?.status === 409) {
         setCheckoutStep('details');
         setSelectedNumbers([]);
@@ -617,7 +619,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
         setNumberRetryKey((current) => current + 1);
         showNotice('Um ou mais números foram reservados. Confira a disponibilidade e selecione novamente.');
       } else {
-        setFormError(error instanceof Error ? error.message : 'Não foi possível gerar o Pix demonstrativo.');
+        setFormError(error instanceof Error ? error.message : 'Não foi possível gerar o Pix.');
       }
     } finally {
       setIsGeneratingPix(false);
@@ -628,7 +630,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
     if (!pixOrder) return;
     try {
       await navigator.clipboard.writeText(pixOrder.copyPasteCode);
-      setCopyMessage('Código demonstrativo copiado.');
+      setCopyMessage('Código Pix copiado.');
     } catch {
       setCopyMessage('Não foi possível copiar automaticamente. Selecione o código acima e copie manualmente.');
     }
@@ -688,11 +690,11 @@ function RaffleDetailsPage({ raffle, showNotice }) {
                 </div>
                 <div className="checkout-privacy-note">
                   <span><Icon name="shield" size={18} /></span>
-                  <div><strong>Dados usados nesta reserva demonstrativa</strong><small>Nome e WhatsApp serão associados à compra para identificar os números reservados.</small></div>
+                  <div><strong>Dados usados nesta reserva</strong><small>Nome e WhatsApp serão associados à compra para identificar os números reservados.</small></div>
                 </div>
                 {formError && <p className="checkout-error" role="alert">{formError}</p>}
                 <button className="button button--full checkout-form__submit" type="submit" disabled={isGeneratingPix}>
-                  {isGeneratingPix ? 'Gerando Pix demonstrativo…' : 'Gerar Pix'} <Icon name="arrow" size={18} />
+                  {isGeneratingPix ? 'Gerando Pix…' : 'Gerar Pix'} <Icon name="arrow" size={18} />
                 </button>
               </form>
             </section>
@@ -715,14 +717,14 @@ function RaffleDetailsPage({ raffle, showNotice }) {
           </div>
           <div className="checkout-layout checkout-layout--pix">
             <section className="checkout-card pix-card">
-              <span className="pix-card__status"><Icon name="check" size={14} /> Pix demonstrativo gerado</span>
+              <span className="pix-card__status"><Icon name="check" size={14} /> {pixOrder.isDemo ? 'Pix demonstrativo gerado' : 'QR Pix gerado'}</span>
               <h1>Seus números estão pré-reservados</h1>
-              <p className="pix-card__intro">Esta reserva demonstrativa vale por 15 minutos. O QR code não aceita pagamento.</p>
+              <p className="pix-card__intro">A reserva vale por 15 minutos. Pague dentro desse prazo; o valor vai diretamente para a chave Pix do organizador.</p>
               <p className="pix-card__intro">Código da compra: <strong>{pixOrder.purchaseCode}</strong></p>
               <button className="dashboard-period" type="button" onClick={copyPurchaseCode}>Copiar código da compra</button>
               <a className="text-link" href={`/consultar-compra?codigo=${encodeURIComponent(pixOrder.purchaseCode)}`}>Consultar esta compra</a>
               <div className={`reservation-timer${remainingSeconds === 0 ? ' reservation-timer--expired' : ''}`}>
-                <span>{remainingSeconds === 0 ? 'Prazo demonstrativo encerrado' : 'Tempo restante da reserva'}</span>
+                <span>{remainingSeconds === 0 ? 'Prazo da reserva encerrado' : 'Tempo restante da reserva'}</span>
                 <strong>{countdownLabel}</strong>
               </div>
               {remainingSeconds > 0 ? (
@@ -734,25 +736,24 @@ function RaffleDetailsPage({ raffle, showNotice }) {
                     marginSize={4}
                     bgColor="#ffffff"
                     fgColor="#10251c"
-                    title="QR code Pix demonstrativo"
+                    title="QR code Pix"
                   />
                 </div>
               ) : (
-                <div className="pix-expired-note">Esta pré-reserva de demonstração expirou. Volte para a rifa e selecione os números novamente.</div>
+                <div className="pix-expired-note">A reserva expirou. Não pague este Pix: o QR estático pode continuar aceitando pagamentos, mas os números podem já estar disponíveis para outra pessoa.</div>
               )}
-              <div className="pix-copy-field">
-                <label htmlFor="pix-copy-code">Código Pix demonstrativo</label>
+              {remainingSeconds > 0 && <div className="pix-copy-field">
+                <label htmlFor="pix-copy-code">Pix copia e cola</label>
                 <code id="pix-copy-code">{pixOrder.copyPasteCode}</code>
-                <button className="button button--full" type="button" onClick={copyPixCode} disabled={remainingSeconds === 0}>
-                  {copyMessage.startsWith('Código demonstrativo copiado') ? 'Código copiado' : 'Copiar código demonstrativo'}
+                <button className="button button--full" type="button" onClick={copyPixCode}>
+                  {copyMessage.startsWith('Código Pix copiado') ? 'Código copiado' : 'Copiar código Pix'}
                 </button>
                 {copyMessage && <p className="pix-copy-field__message" role="status">{copyMessage}</p>}
-                <button className="dashboard-period payment-save-button" type="button" onClick={() => savePurchaseReceiptPdf(pixOrder, raffle).catch(() => showNotice('Não foi possível gerar o comprovante em PDF neste navegador.'))}>Baixar comprovante em PDF</button>
-              </div>
-              <div className="pix-demo-warning">
-                <strong>Simulação — não é uma cobrança válida.</strong>
-                <span>Este QR code e o código copia e cola são fictícios. Nenhum pagamento é enviado ou confirmado.</span>
-              </div>
+              </div>}
+              <button className="dashboard-period payment-save-button" type="button" onClick={() => savePurchaseReceiptPdf(pixOrder, raffle).catch(() => showNotice('Não foi possível gerar o comprovante em PDF neste navegador.'))}>Baixar comprovante em PDF</button>
+              {pixOrder.isDemo
+                ? <div className="pix-payment-warning"><strong>Simulação — não é uma cobrança válida.</strong><span>Este QR code e o código copia e cola são fictícios. Nenhum pagamento é enviado ou confirmado.</span></div>
+                : <div className="pix-payment-warning"><strong>Confirmação manual do pagamento.</strong><span>O Pix é estático e pode continuar aceitando pagamentos depois do prazo. Não pague após a reserva expirar. O pagamento não é confirmado automaticamente; o organizador analisará o comprovante ou confirmará a transação no painel.</span></div>}
             </section>
             <ParticipationSummary raffle={raffle} selectedNumbers={selectedNumbers} total={pixOrder.amountInCents / 100} />
           </div>
@@ -782,6 +783,13 @@ function RaffleDetailsPage({ raffle, showNotice }) {
                 <span><small>Organizado por</small><strong>{raffle.organizer}</strong></span>
                 <Icon name="shield" size={17} />
               </div>
+              {raffle.organizerProfile?.publicId && <a className="detail-organizer-profile" href={`/organizadores/${encodeURIComponent(raffle.organizerProfile.publicId)}`}>
+                <span className="detail-organizer-profile__logo">{raffle.organizerProfile.logoUrl
+                  ? <img src={raffle.organizerProfile.logoUrl} alt={`Logo de ${raffle.organizerProfile.publicName}`} />
+                  : raffle.organizerProfile.publicName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase()}</span>
+                <span><small>Perfil público</small><strong>{raffle.organizerProfile.publicName}</strong>{raffle.organizerProfile.message && <small>{raffle.organizerProfile.message}</small>}</span>
+                <span className="detail-organizer-profile__link">Ver perfil <Icon name="arrow" size={15} /></span>
+              </a>}
               <div className="detail-facts">
                 <div><Icon name="ticket" size={20} /><span><small>Valor do prêmio</small><strong>{raffle.prizeValue === 'A confirmar' ? raffle.prizeValue : `R$ ${raffle.prizeValue}`}</strong></span></div>
                 <div><Icon name="calendar" size={20} /><span><small>Data do sorteio</small><strong>{raffle.drawingDateLong}</strong></span></div>
@@ -806,7 +814,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
             </div>
             <div className="detail-safe">
               <span><Icon name="shield" size={20} /></span>
-              <div><strong>Participação segura</strong><small>O checkout de pagamento será conectado em uma próxima etapa.</small></div>
+              <div><strong>Pagamento por Pix</strong><small>O valor vai para a chave Pix do organizador. A confirmação é manual.</small></div>
             </div>
           </section>
         </div>
@@ -898,7 +906,7 @@ function RaffleDetailsPage({ raffle, showNotice }) {
               Continuar <Icon name="arrow" size={18} />
             </button>
           </div>
-          <p className="detail-demo-note">Disponibilidade demonstrativa. Os números ficam pré-reservados por 15 minutos após gerar o código Pix.</p>
+          <p className="detail-demo-note">Os números ficam pré-reservados por 15 minutos após gerar o Pix. Pague antes do prazo; a confirmação é manual pelo organizador.</p>
         </section> : <section className="raffle-completed-note"><strong>Esta rifa já foi sorteada.</strong><p>As participações foram encerradas. Confira o resultado oficial acima.</p><a className="button" href="/rifas">Ver outras rifas <Icon name="arrow" size={18} /></a></section>}
       </div>
     </main>
@@ -936,7 +944,7 @@ function HomePage() {
       </div>
     </section>
     <section className="platform-audience section"><div className="container"><div className="section-heading"><p className="section-kicker">Para cada lado da rifa</p><h2>Mais clareza em toda a jornada</h2></div><div className="platform-audience__grid"><article><span>01</span><h3>Para quem organiza</h3><p>Crie rifas, acompanhe reservas, confira participantes e consulte os resultados em um só painel.</p><a href="/organizador/solicitar-acesso">Conheça o painel <Icon name="arrow" size={16} /></a></article><article><span>02</span><h3>Para quem participa</h3><p>Veja rifas disponíveis, escolha números livres e consulte o andamento da sua compra com um código próprio.</p><a href="/rifas">Encontrar uma rifa <Icon name="arrow" size={16} /></a></article></div></div></section>
-    <section className="platform-how section" id="como-funciona"><div className="container"><div className="section-heading"><p className="section-kicker">Como funciona</p><h2>Uma jornada em passos simples</h2></div><div className="platform-how__grid"><article><span>1</span><h3>Encontre uma rifa</h3><p>Pesquise pelo nome da campanha ou do organizador.</p></article><article><span>2</span><h3>Escolha seus números</h3><p>A disponibilidade é validada novamente quando a reserva é criada.</p></article><article><span>3</span><h3>Acompanhe sua compra</h3><p>Guarde o código da compra para consultar o status e os números selecionados.</p></article></div><div className="platform-payment-note"><Icon name="shield" size={19} /><p><strong>Sobre pagamentos:</strong> o fluxo Pix deste ambiente ainda é demonstrativo e não recebe valores. Uma reserva não significa pagamento confirmado.</p></div></div></section>
+    <section className="platform-how section" id="como-funciona"><div className="container"><div className="section-heading"><p className="section-kicker">Como funciona</p><h2>Uma jornada em passos simples</h2></div><div className="platform-how__grid"><article><span>1</span><h3>Encontre uma rifa</h3><p>Pesquise pelo nome da campanha ou do organizador.</p></article><article><span>2</span><h3>Escolha seus números</h3><p>A disponibilidade é validada novamente quando a reserva é criada.</p></article><article><span>3</span><h3>Acompanhe sua compra</h3><p>Guarde o código da compra para consultar o status e os números selecionados.</p></article></div><div className="platform-payment-note"><Icon name="shield" size={19} /><p><strong>Sobre pagamentos:</strong> o Pix é enviado diretamente para a chave cadastrada pelo organizador. A reserva dura 15 minutos e o pagamento é confirmado manualmente. Não pague depois que o prazo expirar.</p></div></div></section>
     <section className="platform-cta"><div className="container"><div><p className="section-kicker">Comece por aqui</p><h2>Pronto para encontrar sua próxima rifa?</h2><p>Consulte o catálogo público ou procure uma compra pelo código.</p></div><div><a className="button" href="/rifas">Ver rifas <Icon name="arrow" size={18} /></a><a className="platform-cta__link" href="/consultar-compra">Consultar compra</a></div></div></section>
   </main>;
 }
@@ -1085,7 +1093,10 @@ async function savePurchaseReceiptPdf(order, raffle) {
   y += 15;
   doc.setTextColor(163, 65, 41);
   doc.setFont('helvetica', 'bold');
-  const noticeLines = doc.splitTextToSize('Reserva demonstrativa. Este documento não confirma pagamento.', 170);
+  const receiptNotice = order.isDemo
+    ? 'Reserva demonstrativa. Este documento não confirma pagamento.'
+    : 'Este comprovante registra a reserva. O Pix deve ser pago em até 15 minutos; o organizador confirma o pagamento manualmente.';
+  const noticeLines = doc.splitTextToSize(receiptNotice, 170);
   doc.text(noticeLines, 20, y);
   y += noticeLines.length * 6 + 10;
   doc.setTextColor(23, 37, 29);

@@ -8,6 +8,7 @@ const numbersTable = process.env.RAFFLE_NUMBERS_TABLE;
 const transactionsTable = process.env.RAFFLE_TRANSACTIONS_TABLE;
 const participantLimitsTable = process.env.PARTICIPANT_LIMITS_TABLE;
 const participantLimitHashSecretArn = process.env.PARTICIPANT_LIMIT_HASH_SECRET_ARN;
+const appConfigTable = process.env.APP_CONFIG_TABLE;
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const secretsManager = new SecretsManagerClient({});
 const RESERVATION_DURATION_MS = 15 * 60 * 1000;
@@ -53,6 +54,65 @@ async function getParticipantId(phone) {
 
 function hashPurchaseCode(code) {
   return participantLimitHashSecretPromise.then((secret) => createHmac('sha256', secret).update(code, 'utf8').digest('hex'));
+}
+
+function tlv(id, value) {
+  const length = Buffer.byteLength(value, 'utf8');
+  if (length > 99) throw new Error(`Pix field ${id} is too long.`);
+  return `${id}${String(length).padStart(2, '0')}${value}`;
+}
+
+function pixCrc16(value) {
+  let crc = 0xffff;
+  for (const byte of Buffer.from(value, 'ascii')) {
+    crc ^= byte << 8;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+      crc &= 0xffff;
+    }
+  }
+  return crc.toString(16).toUpperCase().padStart(4, '0');
+}
+
+function normalizePixKey(value) {
+  if (typeof value !== 'string') return '';
+  const key = value.trim();
+  const digitsOnly = /^\d{11}$|^\d{14}$/.test(key);
+  const cnpjAlphanumeric = /^[A-Z0-9]{14}$/i.test(key) && /[A-Z]/i.test(key);
+  const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(key) && Buffer.byteLength(key, 'utf8') <= 77;
+  const phone = /^\+55\d{10,11}$/.test(key);
+  const evp = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(key);
+  return digitsOnly || cnpjAlphanumeric || email || phone || evp ? key : '';
+}
+
+function normalizePixMerchantText(value, maxLength) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9 .'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase()
+    .slice(0, maxLength);
+}
+
+function buildPixPayload({ pixKey, amountInCents, merchantName, pixCity, txid }) {
+  const merchantAccount = `${tlv('00', 'br.gov.bcb.pix')}${tlv('01', pixKey)}`;
+  const additionalData = tlv('05', txid);
+  const withoutCrc = [
+    tlv('00', '01'),
+    tlv('01', '11'),
+    tlv('26', merchantAccount),
+    tlv('52', '0000'),
+    tlv('53', '986'),
+    tlv('54', (amountInCents / 100).toFixed(2)),
+    tlv('58', 'BR'),
+    tlv('59', merchantName),
+    tlv('60', pixCity),
+    tlv('62', additionalData),
+    '6304',
+  ].join('');
+  return `${withoutCrc}${pixCrc16(withoutCrc)}`;
 }
 
 function purchaseLimitError({ maxNumbersPerUser, alreadyCounted, requested }) {
@@ -107,7 +167,8 @@ function normalizeCustomer(customer) {
 }
 
 export const handler = async (event) => {
-  if (!rafflesTable || !numbersTable || !transactionsTable || !participantLimitsTable || !participantLimitHashSecretArn) {
+  if (!rafflesTable || !numbersTable || !transactionsTable || !participantLimitsTable
+    || !participantLimitHashSecretArn || !appConfigTable) {
     console.error('Missing table environment variables for Pix order creation.');
     return json(500, { message: 'A geração de Pix não está configurada.' });
   }
@@ -143,6 +204,20 @@ export const handler = async (event) => {
     const raffle = raffleResult.Item;
     if (!raffle || raffle.status !== 'ACTIVE') {
       return json(404, { message: 'Rifa não encontrada ou indisponível.' });
+    }
+
+    const settingsResult = await dynamo.send(new GetCommand({
+      TableName: appConfigTable,
+      Key: { configKey: `ORGANIZER_SETTINGS#${raffle.organizerSub}` },
+      ConsistentRead: true,
+    }));
+    const pixKey = normalizePixKey(settingsResult.Item?.pixKey);
+    const pixCity = normalizePixMerchantText(settingsResult.Item?.pixCity, 15);
+    if (!pixKey || !pixCity) {
+      return json(409, {
+        code: 'PIX_NOT_CONFIGURED',
+        message: 'O organizador ainda não configurou uma chave Pix válida para esta rifa.',
+      });
     }
 
     const totalNumbers = Number(raffle.numberCount);
@@ -184,6 +259,7 @@ export const handler = async (event) => {
     const expiresAt = Date.now() + RESERVATION_DURATION_MS;
     const expiresAtEpoch = Math.ceil(expiresAt / 1000);
     const transactionId = randomUUID();
+    const pixTxid = randomBytes(12).toString('hex').toUpperCase();
     const purchaseCode = createPurchaseCode();
     const purchaseCodeHash = await hashPurchaseCode(purchaseCode);
     const createdAt = new Date(createdAtEpoch * 1000).toISOString();
@@ -205,9 +281,11 @@ export const handler = async (event) => {
       pendingStatus: 'PENDING',
       expiresAt: new Date(expiresAt).toISOString(),
       expiresAtEpoch,
-      isDemo: true,
+      pixTxid,
+      isDemo: false,
     };
-    const copyPasteCode = `RIFOU-DEMO|PEDIDO:${purchaseCode}|RIFA:${raffleId}|NUMEROS:${numbers.join('-')}|VALOR:${(amountInCents / 100).toFixed(2)}`;
+    const merchantName = normalizePixMerchantText(raffle.organizer || 'RIFOU ORGANIZADOR', 25) || 'RIFOU';
+    const copyPasteCode = buildPixPayload({ pixKey, amountInCents, merchantName, pixCity, txid: pixTxid });
     const now = new Date().toISOString();
 
     const numberUpdates = numbers.map((number) => ({
@@ -282,7 +360,7 @@ export const handler = async (event) => {
       ],
     }));
 
-    console.info('Created fake Pix order and reserved raffle numbers.', {
+    console.info('Created Pix order and reserved raffle numbers.', {
       transactionId,
       raffleId,
       quantity: numbers.length,
@@ -301,7 +379,8 @@ export const handler = async (event) => {
         status: 'PENDING',
         expiresAt,
         copyPasteCode,
-        isDemo: true,
+        pixTxid,
+        isDemo: false,
       },
     });
   } catch (error) {
@@ -324,11 +403,11 @@ export const handler = async (event) => {
       }
       return json(409, { message: 'A rifa ou a disponibilidade dos números mudou. Confira os números e tente novamente.' });
     }
-    console.error('Failed to create fake Pix order.', {
+    console.error('Failed to create Pix order.', {
       name: error?.name || 'UnknownError',
       message: error?.message,
       requestId: event.requestContext?.requestId,
     });
-    return json(500, { message: 'Não foi possível gerar o Pix demonstrativo agora.' });
+    return json(500, { message: 'Não foi possível gerar o Pix agora.' });
   }
 };

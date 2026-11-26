@@ -2,6 +2,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 
 const tableName = process.env.RAFFLES_TABLE;
+const organizerProfilesTable = process.env.ORGANIZER_PROFILES_TABLE;
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 function json(statusCode, payload) {
@@ -107,7 +108,31 @@ export const handler = async (event) => {
     if (!isPublic) {
       return json(404, { message: 'Rifa não encontrada.' });
     }
-    return json(200, { item: toPublicRaffle(result.Item) });
+    let organizerProfile = null;
+    if (organizerProfilesTable && result.Item.organizerSub) {
+      try {
+        const profileResult = await dynamo.send(new GetCommand({
+          TableName: organizerProfilesTable,
+          Key: { organizerSub: result.Item.organizerSub },
+          ConsistentRead: true,
+        }));
+        const profile = profileResult.Item;
+        if (profile?.publicId && profile?.publicName) {
+          organizerProfile = {
+            publicId: profile.publicId,
+            publicName: profile.publicName,
+            message: typeof profile.message === 'string' ? profile.message : '',
+            logoUrl: typeof profile.logoUrl === 'string' ? profile.logoUrl : '',
+          };
+        }
+      } catch (profileError) {
+        console.warn('Could not load the optional public organizer profile for raffle.', {
+          name: profileError?.name || 'UnknownError',
+          requestId: event.requestContext?.requestId,
+        });
+      }
+    }
+    return json(200, { item: { ...toPublicRaffle(result.Item), organizerProfile } });
   } catch (error) {
     console.error('Failed to get public raffle.', {
       name: error?.name || 'UnknownError',

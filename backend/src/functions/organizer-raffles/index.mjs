@@ -375,7 +375,8 @@ async function listAuditEvents(event, owner) {
   const items = (result.Items || []).filter((item) => item.organizerSub === owner.sub).map((item) => ({
     auditId: item.auditId,
     organizerSub: item.organizerSub,
-    actor: item.actor === 'Sistema' ? 'Sistema' : owner.email || item.actorEmail || item.actor || 'Organizador',
+    actor: item.actor === 'Sistema' ? 'Sistema' : [item.actorEmail, owner.email, item.actor]
+      .find((value) => typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) || 'Organizador',
     action: item.action,
     raffleId: item.raffleId || '',
     raffleTitle: item.raffleTitle || '',
@@ -727,6 +728,20 @@ function completionDelayDays(value) {
     : DEFAULT_COMPLETION_DELAY_DAYS;
 }
 
+function normalizePixKey(value) {
+  if (typeof value !== 'string' || !value) return '';
+  const key = value.trim();
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(key) && Buffer.byteLength(key, 'utf8') <= 77) return key;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(key)) return key;
+  const compact = key.replace(/[\s().-]/g, '');
+  if (/^\+?55\d{10,11}$/.test(compact)) return compact.startsWith('+') ? compact : `+${compact}`;
+  const digits = key.replace(/\D/g, '');
+  if (/^\d{11}$|^\d{14}$/.test(digits)) return digits;
+  const cnpj = key.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  if (/^[A-Z0-9]{14}$/.test(cnpj) && /[A-Z]/.test(cnpj)) return cnpj;
+  return '';
+}
+
 async function getOrganizerRaffleSettings(ownerSub) {
   if (!appConfigTable) throw new Error('Missing APP_CONFIG_TABLE configuration.');
   const result = await dynamo.send(new GetCommand({
@@ -736,6 +751,8 @@ async function getOrganizerRaffleSettings(ownerSub) {
   }));
   return {
     completionDelayDays: completionDelayDays(result.Item?.completionDelayDays),
+    pixKey: typeof result.Item?.pixKey === 'string' ? result.Item.pixKey : '',
+    pixCity: typeof result.Item?.pixCity === 'string' ? result.Item.pixCity : '',
     updatedAt: result.Item?.updatedAt || '',
   };
 }
@@ -747,19 +764,29 @@ async function saveOrganizerRaffleSettings(event, owner) {
   if (!Number.isInteger(days) || days < MIN_COMPLETION_DELAY_DAYS || days > MAX_COMPLETION_DELAY_DAYS) {
     return json(400, { message: 'Informe um prazo entre 1 e 365 dias após o sorteio.' });
   }
+  const rawPixKey = typeof payload?.pixKey === 'string' ? payload.pixKey.trim() : '';
+  const pixKey = normalizePixKey(rawPixKey);
+  const pixCity = typeof payload?.pixCity === 'string' ? payload.pixCity.trim().replace(/\s+/g, ' ') : '';
+  if ((pixKey && !pixCity) || (!pixKey && pixCity)) {
+    return json(400, { message: 'Informe a chave Pix e a cidade do recebedor, ou deixe os dois campos vazios.' });
+  }
+  if ((rawPixKey && !pixKey) || Buffer.byteLength(pixKey, 'utf8') > 77 || pixCity.length > 15
+    || (pixCity && !/^[\p{L}\p{M} .'-]+$/u.test(pixCity))) {
+    return json(400, { message: 'Confira a chave Pix e informe uma cidade válida com até 15 caracteres.' });
+  }
   const now = new Date().toISOString();
-  const item = { ...organizerSettingsKey(owner.sub), completionDelayDays: days, updatedAt: now };
+  const item = { ...organizerSettingsKey(owner.sub), completionDelayDays: days, pixKey, pixCity, updatedAt: now };
   await dynamo.send(new TransactWriteCommand({
     TransactItems: [
       { Put: { TableName: appConfigTable, Item: item } },
       auditPut(owner, {
         action: 'ORGANIZER_SETTINGS_UPDATED',
         occurredAt: now,
-        details: { completionDelayDays: days },
+        details: { completionDelayDays: days, pixKeyConfigured: Boolean(pixKey), pixCity },
       }),
     ],
   }));
-  return json(200, { settings: { completionDelayDays: days, updatedAt: now } });
+  return json(200, { settings: { completionDelayDays: days, pixKey, pixCity, updatedAt: now } });
 }
 
 function monthEpochBounds(month) {
@@ -1823,7 +1850,8 @@ async function raffleTransactions(event, ownerSub) {
     refundResolutionStatus: order.refundResolutionStatus || '',
     refundResolutionNote: order.refundResolutionNote || '',
     isDemo: Boolean(order.isDemo),
-  }))).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  })));
+  items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   return json(200, {
     raffleId,

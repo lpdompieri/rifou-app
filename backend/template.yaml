@@ -973,6 +973,7 @@ Resources:
       Environment:
         Variables:
           RAFFLES_TABLE: !Ref RafflesTable
+          ORGANIZER_PROFILES_TABLE: !Ref OrganizerProfilesTable
       Policies:
         - AWSLambdaBasicExecutionRole
         - Version: '2012-10-17'
@@ -982,6 +983,11 @@ Resources:
               Action:
                 - dynamodb:GetItem
               Resource: !GetAtt RafflesTable.Arn
+            - Sid: ReadPublicOrganizerProfile
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt OrganizerProfilesTable.Arn
       Events:
         GetActiveRaffle:
           Type: HttpApi
@@ -1035,6 +1041,7 @@ Resources:
           RAFFLE_TRANSACTIONS_TABLE: !Ref RaffleTransactionsTable
           PARTICIPANT_LIMITS_TABLE: !Ref RaffleParticipantLimitsTable
           PARTICIPANT_LIMIT_HASH_SECRET_ARN: !Ref ParticipantLimitHashSecret
+          APP_CONFIG_TABLE: !Ref RaffleAppConfigTable
       Policies:
         - AWSLambdaBasicExecutionRole
         - Version: '2012-10-17'
@@ -1044,6 +1051,11 @@ Resources:
               Action:
                 - dynamodb:GetItem
               Resource: !GetAtt RafflesTable.Arn
+            - Sid: ReadOrganizerPixSettings
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt RaffleAppConfigTable.Arn
             - Sid: CreatePixOrderRecord
               Effect: Allow
               Action:
