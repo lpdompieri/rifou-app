@@ -1,7 +1,8 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 
 const tableName = process.env.RAFFLES_TABLE;
+const organizerProfilesTable = process.env.ORGANIZER_PROFILES_TABLE;
 const publicIndex = process.env.PUBLIC_RAFFLES_INDEX || 'PublicRafflesIndex';
 const featuredIndex = process.env.FEATURED_RAFFLES_INDEX || 'FeaturedRafflesIndex';
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -110,6 +111,42 @@ function toPublicRaffle(item) {
   return result;
 }
 
+async function attachOrganizerProfiles(items, requestId) {
+  if (!organizerProfilesTable) return items.map(toPublicRaffle);
+  const profileRequests = new Map();
+  for (const item of items) {
+    if (!item.organizerSub || profileRequests.has(item.organizerSub)) continue;
+    profileRequests.set(item.organizerSub, dynamo.send(new GetCommand({
+      TableName: organizerProfilesTable,
+      Key: { organizerSub: item.organizerSub },
+      ProjectionExpression: '#publicId, #publicName, #message, #logoUrl',
+      ExpressionAttributeNames: {
+        '#publicId': 'publicId',
+        '#publicName': 'publicName',
+        '#message': 'message',
+        '#logoUrl': 'logoUrl',
+      },
+      ConsistentRead: true,
+    })).then(({ Item: profile }) => profile?.publicId && profile?.publicName ? {
+      publicId: profile.publicId,
+      publicName: profile.publicName,
+      message: typeof profile.message === 'string' ? profile.message : '',
+      logoUrl: typeof profile.logoUrl === 'string' ? profile.logoUrl : '',
+    } : null).catch((error) => {
+      console.warn('Could not load an optional public organizer profile for raffle list.', {
+        name: error?.name || 'UnknownError',
+        requestId,
+      });
+      return null;
+    }));
+  }
+  const profiles = new Map(await Promise.all([...profileRequests].map(async ([organizerSub, request]) => [organizerSub, await request])));
+  return items.map((item) => ({
+    ...toPublicRaffle(item),
+    organizerProfile: profiles.get(item.organizerSub) || null,
+  }));
+}
+
 export const handler = async (event) => {
   if (!tableName) {
     console.error('Missing RAFFLES_TABLE environment variable.');
@@ -172,7 +209,7 @@ export const handler = async (event) => {
 
   try {
     const result = await dynamo.send(new QueryCommand(commandInput));
-    const items = (result.Items || []).map(toPublicRaffle);
+    const items = await attachOrganizerProfiles(result.Items || [], event.requestContext?.requestId);
     const nextToken = result.LastEvaluatedKey
       ? Buffer.from(JSON.stringify(result.LastEvaluatedKey)).toString('base64url')
       : null;
