@@ -86,13 +86,19 @@ export const handler = async (event) => {
     } while (exclusiveStartKey);
     const eligible = raffles.filter((raffle) => raffle.publicStatus === raffle.status && ['ACTIVE', 'DRAWN'].includes(raffle.status));
     const featuredIds = new Set(Array.isArray(profile.featuredRaffleIds) ? profile.featuredRaffleIds : []);
-    const items = eligible.map((raffle) => toPublicRaffle(raffle, featuredIds.has(raffle.raffleId)))
-      .sort((first, second) => Number(second.featured) - Number(first.featured) || second.id.localeCompare(first.id));
-    return json(200, { profile: {
+    const organizerProfile = {
       publicId: profile.publicId,
       publicName: profile.publicName || 'Organizador',
       message: profile.message || '',
       logoUrl: profile.logoUrl || '',
+    };
+    const items = eligible.map((raffle) => ({
+      ...toPublicRaffle(raffle, featuredIds.has(raffle.raffleId)),
+      organizerProfile,
+    }))
+      .sort((first, second) => Number(second.featured) - Number(first.featured) || second.id.localeCompare(first.id));
+    return json(200, { profile: {
+      ...organizerProfile,
     }, items, count: items.length });
   } catch (error) {
     console.error('Failed to read public organizer profile.', { name: error?.name || 'UnknownError', requestId: event.requestContext?.requestId });

@@ -596,6 +596,7 @@ Resources:
       Environment:
         Variables:
           RAFFLES_TABLE: !Ref RafflesTable
+          ORGANIZER_PROFILES_TABLE: !Ref OrganizerProfilesTable
           PUBLIC_RAFFLES_INDEX: PublicRafflesIndex
           FEATURED_RAFFLES_INDEX: FeaturedRafflesIndex
       Policies:
@@ -609,6 +610,11 @@ Resources:
               Resource:
                 - !Sub '${RafflesTable.Arn}/index/PublicRafflesIndex'
                 - !Sub '${RafflesTable.Arn}/index/FeaturedRafflesIndex'
+            - Sid: ReadPublicOrganizerProfilesForRaffles
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !GetAtt OrganizerProfilesTable.Arn
       Events:
         ListActiveRaffles:
           Type: HttpApi

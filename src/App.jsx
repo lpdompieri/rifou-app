@@ -200,6 +200,7 @@ function Progress({ value, compact = false }) {
 
 function RaffleCard({ raffle }) {
   const detailUrl = `/rifas/${raffle.id}`;
+  const organizerName = raffle.organizerProfile?.publicName || raffle.organizer;
 
   return (
     <article className="raffle-card">
@@ -208,7 +209,9 @@ function RaffleCard({ raffle }) {
         <span className="raffle-card__badge">{raffle.status === 'DRAWN' ? 'Sorteada' : 'Ativa'}</span>
       </a>
       <div className="raffle-card__body">
-        <p className="raffle-card__organizer">{raffle.organizer}</p>
+        {raffle.organizerProfile?.publicId
+          ? <a className="raffle-card__organizer" href={`/organizadores/${encodeURIComponent(raffle.organizerProfile.publicId)}`}>{organizerName}</a>
+          : <p className="raffle-card__organizer">{organizerName}</p>}
         <h3><a href={detailUrl}>{raffle.title}</a></h3>
         <div className="raffle-card__details">
           <div>
@@ -347,11 +350,11 @@ function RafflesPage({ raffles, drawnRaffles }) {
   const [search, setSearch] = useState('');
   const normalizedSearch = search.trim().toLocaleLowerCase('pt-BR');
   const visibleRaffles = normalizedSearch
-    ? raffles.filter((raffle) => [raffle.title, raffle.organizer, raffle.description, raffle.prizeValue]
+    ? raffles.filter((raffle) => [raffle.title, raffle.organizer, raffle.organizerProfile?.publicName, raffle.description, raffle.prizeValue]
       .some((value) => String(value || '').toLocaleLowerCase('pt-BR').includes(normalizedSearch)))
     : raffles;
   const visibleDrawnRaffles = normalizedSearch
-    ? drawnRaffles.filter((raffle) => [raffle.title, raffle.organizer, raffle.description, raffle.drawResult?.winnerName]
+    ? drawnRaffles.filter((raffle) => [raffle.title, raffle.organizer, raffle.organizerProfile?.publicName, raffle.description, raffle.drawResult?.winnerName]
       .some((value) => String(value || '').toLocaleLowerCase('pt-BR').includes(normalizedSearch)))
     : drawnRaffles;
   return (
@@ -476,6 +479,14 @@ function RaffleDetailsPage({ raffle, showNotice }) {
   const organizerInitials = raffle.organizer.split(' ').map((name) => name[0]).join('').slice(0, 2).toUpperCase();
   const remainingSeconds = pixOrder ? Math.max(0, Math.ceil((pixOrder.expiresAt - now) / 1000)) : 0;
   const countdownLabel = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
+
+  useEffect(() => {
+    if (checkoutStep === 'details') return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      document.querySelector('.checkout-page')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [checkoutStep]);
 
   useEffect(() => {
     if (checkoutStep !== 'pix' || !pixOrder) return undefined;
@@ -606,20 +617,25 @@ function RaffleDetailsPage({ raffle, showNotice }) {
       setNow(Date.now());
       setCopyMessage('');
       setCheckoutStep('pix');
+      showNotice(order.isDemo ? 'Pix demonstrativo gerado. Revise os dados antes de continuar.' : 'Pix gerado. Confira o QR code e conclua o pagamento dentro do prazo.', 'success');
     } catch (error) {
       if (error?.code === 'USER_LIMIT_REACHED') {
         setCheckoutStep('details');
-        showNotice(error.message);
+        showNotice(error.message, 'error');
       } else if (error?.code === 'PIX_NOT_CONFIGURED') {
-        setFormError(error.message || 'O organizador ainda não configurou uma chave Pix.');
+        const message = error.message || 'O organizador ainda não configurou uma chave Pix.';
+        setFormError(message);
+        showNotice(message, 'error');
       } else if (error?.status === 409) {
         setCheckoutStep('details');
         setSelectedNumbers([]);
         setCurrentPage(0);
         setNumberRetryKey((current) => current + 1);
-        showNotice('Um ou mais números foram reservados. Confira a disponibilidade e selecione novamente.');
+        showNotice('Um ou mais números foram reservados. Confira a disponibilidade e selecione novamente.', 'error');
       } else {
-        setFormError(error instanceof Error ? error.message : 'Não foi possível gerar o Pix.');
+        const message = error instanceof Error ? error.message : 'Não foi possível gerar o Pix.';
+        setFormError(message);
+        showNotice(message, 'error');
       }
     } finally {
       setIsGeneratingPix(false);
@@ -631,8 +647,10 @@ function RaffleDetailsPage({ raffle, showNotice }) {
     try {
       await navigator.clipboard.writeText(pixOrder.copyPasteCode);
       setCopyMessage('Código Pix copiado.');
+      showNotice('Código Pix copiado para a área de transferência.', 'success');
     } catch {
       setCopyMessage('Não foi possível copiar automaticamente. Selecione o código acima e copie manualmente.');
+      showNotice('Não foi possível copiar automaticamente. Selecione o código Pix e copie manualmente.', 'error');
     }
   };
 
@@ -1139,6 +1157,7 @@ function RafflesLoadState({ error, onRetry }) {
 function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [notice, setNotice] = useState('');
+  const [noticeKind, setNoticeKind] = useState('info');
   const [raffles, setRaffles] = useState([]);
   const [drawnRaffles, setDrawnRaffles] = useState([]);
   const [rafflesRequest, setRafflesRequest] = useState({ status: 'loading' });
@@ -1164,6 +1183,22 @@ function App() {
   useEffect(() => {
     document.title = pageTitle;
   }, [pageTitle]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      let hashTarget = null;
+      if (window.location.hash) {
+        try {
+          hashTarget = document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+        } catch {
+          hashTarget = null;
+        }
+      }
+      const target = hashTarget || document.querySelector('.platform-home, .catalog-page, .detail-page, .checkout-page, .public-purchase-page, .public-profile-page, .organizer-auth, .organizer-dashboard, .not-found-page');
+      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [currentPath, raffleDetailRequest.status, rafflesRequest.status]);
 
   useEffect(() => {
     if (isOrganizerRoute || raffleIdFromPath || !isCatalogRoute) return undefined;
@@ -1236,11 +1271,16 @@ function App() {
     return () => controller.abort();
   }, [raffleIdFromPath, rafflesRetryKey]);
 
-  const showNotice = (message) => {
+  const showNotice = (message, kind = 'info') => {
     setNotice(message);
+    setNoticeKind(kind);
     window.clearTimeout(noticeTimeout.current);
-    noticeTimeout.current = window.setTimeout(() => setNotice(''), 3200);
+    noticeTimeout.current = window.setTimeout(() => setNotice(''), 5200);
   };
+
+  const noticeToast = <div className={`toast${notice ? ' toast--visible' : ''}`} data-kind={noticeKind} role={noticeKind === 'error' ? 'alert' : 'status'} aria-live={noticeKind === 'error' ? 'assertive' : 'polite'}>
+    {notice && <><span className="toast__icon" aria-hidden="true">{noticeKind === 'success' ? '✓' : noticeKind === 'error' ? '!' : 'i'}</span><span className="toast__copy"><strong>{noticeKind === 'success' ? 'Concluído' : noticeKind === 'error' ? 'Atenção' : 'Aviso'}</strong><span>{notice}</span></span><button type="button" aria-label="Fechar aviso" onClick={() => { setNotice(''); window.clearTimeout(noticeTimeout.current); }}>×</button></>}
+  </div>;
 
   const publicRequest = detailMatch ? raffleDetailRequest : rafflesRequest;
   if (!isOrganizerRoute && (isCatalogRoute || detailMatch) && publicRequest.status !== 'ready') {
@@ -1252,13 +1292,14 @@ function App() {
           onRetry={() => setRafflesRetryKey((current) => current + 1)}
         />
         <SiteFooter showNotice={showNotice} />
+        {noticeToast}
       </>
     );
   }
 
-  if (!isOrganizerRoute && currentPath === '/') return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><HomePage /><SiteFooter showNotice={showNotice} /></>;
-  if (!isOrganizerRoute && currentPath === '/consultar-compra') return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><PublicPurchasePage /><SiteFooter showNotice={showNotice} /></>;
-  if (!isOrganizerRoute && organizerProfileMatch) return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><PublicOrganizerPage publicId={organizerProfileMatch[1].toUpperCase()} /><SiteFooter showNotice={showNotice} /></>;
+  if (!isOrganizerRoute && currentPath === '/') return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><HomePage /><SiteFooter showNotice={showNotice} />{noticeToast}</>;
+  if (!isOrganizerRoute && currentPath === '/consultar-compra') return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><PublicPurchasePage /><SiteFooter showNotice={showNotice} />{noticeToast}</>;
+  if (!isOrganizerRoute && organizerProfileMatch) return <><Header menuOpen={menuOpen} setMenuOpen={setMenuOpen} /><PublicOrganizerPage publicId={organizerProfileMatch[1].toUpperCase()} /><SiteFooter showNotice={showNotice} />{noticeToast}</>;
 
   return (
     <>
@@ -1276,7 +1317,7 @@ function App() {
 
       {!isOrganizerRoute && <SiteFooter showNotice={showNotice} />}
 
-      <div className={`toast${notice ? ' toast--visible' : ''}`} role="status" aria-live="polite">{notice}</div>
+      {noticeToast}
     </>
   );
 }
